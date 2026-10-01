@@ -35,7 +35,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectName>Guide_n_ReadMotion</ProjectName>
+    <ProjectName>RnR</ProjectName>
     <ProjectGuid>{4E336163-8F0D-4672-9CA7-F480621B6EBB}</ProjectGuid>
     <RootNamespace>CommandJointTorque</RootNamespace>
     <Keyword>Win32Proj</Keyword>
@@ -346,7 +346,7 @@ copy "$(IntDir)\$(TargetFileName)" "$(SolutionDir)\..\..\bin\$(PlatformName)\HD<
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Guide_n_ReadMotion.cpp" />
+    <ClCompile Include="RnR.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
