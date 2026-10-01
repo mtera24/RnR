@@ -24,9 +24,9 @@ OH_SDK_BASE=C:\OpenHaptics\Developer\3.5.0
 ```
 ## Visual Studio project
 Current project files:
-- Guide_n_ReadMotion.sln
-- Guide_n_ReadMotion.vcxproj
-- Guide_n_ReadMotion.cpp
+- RnR.sln
+- RnR.vcxproj
+- RnR.cpp
 Current build configuration:
 - Configuration: Debug
 - Platform: x64
@@ -36,16 +36,17 @@ Current build configuration:
 The following operations have been confirmed on the development PC:
 
 1. The Visual Studio project builds successfully.
-2. Guide_n_ReadMotion.exe is generated.
+2. RnR.exe is generated.
 3. Touch is detected by Touch Smart Setup.
 4. Stylus movement is detected correctly.
-5. RnR detects the device as Touch.0
+5. RnR detects the device as Touch.
 6. Calibration completes.
 7. The RnR command menu is displayed.
 
 Record and Replay operations have not yet been fully verified in this reconstructed environment.
 ## Notes
 
-The current Visual Studio project and source file names still use the historical name Guide_n_ReadMotion / Guide_n_Record_v2_2.
-They will be renamed to RnR in a separate change after the working baseline has been preserved.
 The initial working baseline is preserved in Git before making structural changes.
+The original project used the historical name `Guide_n_ReadMotion` / `Guide_n_Record_v2_2`.
+
+The Visual Studio solution, project, source file, and executable have been renamed to `RnR`.
