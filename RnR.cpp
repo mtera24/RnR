@@ -608,12 +608,19 @@ void writeResampledReplayData() {
 int main(int argc, char* argv[])
 {
     const char* replayFilename = NULL;
+    bool autoPlay = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
             replayFilename = argv[++i];
         }
+        else if (strcmp(argv[i], "--play") == 0) {
+            autoPlay = true;
+        }
     }
+
+
+
     HDErrorInfo error;
     /* Initialize the device, must be done before attempting to call any hd 
        functions. Passing in HD_DEFAULT_DEVICE causes the default device to be 
@@ -657,7 +664,9 @@ int main(int argc, char* argv[])
     PrintHelp();
 
     if (replayFilename != NULL) {
-        read_resampled_ReplayData(replayFilename);
+        if (read_resampled_ReplayData(replayFilename) && autoPlay) {
+            ReplayDeviceState();
+        }
     }
 
     /* Start the main application loop */
