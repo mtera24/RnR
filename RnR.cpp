@@ -393,11 +393,12 @@ void ReplayDeviceState()
     }
 
 
-void read_resampled_ReplayData() {
-    FILE* fp_replay_csv = fopen(FNAME_REPLAY_RESAMPLE, "rt");
+bool read_resampled_ReplayData(const char* filename) {
+    FILE* fp_replay_csv = fopen(filename, "rt");
     if (!fp_replay_csv) {
-        fprintf(stderr, "Cannot open file:%s\n", FNAME_REPLAY_RESAMPLE);
-        exit(1);
+        fprintf(stderr, "Cannot open file: %s\n", filename);
+        ReplayReady = false;
+        return false;
     }
     char linebuf[LEN_LINE_CSV];
     int i = 0;
@@ -429,7 +430,7 @@ void read_resampled_ReplayData() {
     end_idx_resample = i + 1;
     fprintf(stderr, "Replay resampled data loaded. total %d elements.\n", end_idx_resample);
     ReplayReady = true;
-    return;
+    return true;
 }
 
 void read_RecordData() {
@@ -676,7 +677,7 @@ void mainLoop()
             
             switch (keypress)
             {
-                case 'L': read_resampled_ReplayData(); PrintHelp(); break;
+                case 'L': read_resampled_ReplayData(FNAME_REPLAY_RESAMPLE); PrintHelp(); break;
                 case 'G': ReplayDeviceState(); PrintHelp(); break;
                 case 'R': RecordDeviceState(); PrintHelp(); break;
                 case 'D': read_RecordData(); PrintHelp(); break;
