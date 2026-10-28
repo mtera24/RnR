@@ -51,6 +51,9 @@ Description:
 
 static bool ReplayMode = false;
 static bool ReplayReady = false; // whether replay data loaded or not.
+
+static const char* Language = "en";
+
 /* # of record */
 #define LEN_REC 10000
 /* interval for recording [ms]*/
@@ -115,7 +118,7 @@ void PrintCwd()
 
 void PrintHelp()
 {
-    static const char help[] = {\
+    static const char help_en[] = { \
 "GuideAndRecord Help\n\
 ---\n\
 L: Load replay data\n\
@@ -128,9 +131,30 @@ A: Load and resample RAW replay data \n\
 W: Write resampled replay data(debug)\n\
 H: Prints help menu\n\
 Q: Quits the program\n\
----"};
-    
-    printf("\n%s\n", help);
+---" };
+
+    static const char help_ja[] = { \
+"GuideAndRecord ヘルプ\n\
+---\n\
+L: 再生データを読み込む\n\
+G: ガイドモードを開始する\n\
+R: 記録モードを開始する\n\
+D: 記録データを読み込む\n\
+P: デバイスの状態を表示する\n\
+C: デバイスの状態を連続して表示する\n\
+A: RAW再生データを読み込み、リサンプリングする\n\
+W: リサンプリングした再生データを書き出す（デバッグ用）\n\
+H: ヘルプメニューを表示する\n\
+Q: プログラムを終了する\n\
+---" };
+
+    if (strcmp(Language, "ja") == 0) {
+        printf("\n%s\n", help_ja);
+    }
+    else {
+        printf("\n%s\n", help_en);
+    }
+
     PrintCwd();
 }
 
@@ -335,63 +359,115 @@ void RecordDeviceState()
 *****************************************************************************/
 void ReplayDeviceState()
 {
-    DWORD now,time_replay_start,time_next;
+    DWORD now, time_replay_start, time_next;
 
     int i;
     int i_resample;
 
-    if (!ReplayReady) { //replay data not loaded successfully
-        fprintf(stderr, "replay data not loaded successfully.\n");
-        fprintf(stderr, "Please confirm replay data loaded by L command.\n");
+    if (!ReplayReady) { // replay data not loaded successfully
+        if (strcmp(Language, "ja") == 0) {
+            fprintf(stderr, "再生データが読み込まれていません。\n");
+            fprintf(stderr, "Lコマンドで再生データを読み込んでください。\n");
+        }
+        else {
+            fprintf(stderr, "replay data not loaded successfully.\n");
+            fprintf(stderr, "Please confirm replay data loaded by L command.\n");
+        }
         return;
     }
 
     // guide to initial gravity well position
-    fprintf(stderr, "Replay mode :\n");
-    fprintf(stderr, "   Please remove stylus from calibration well, and hold any position.\n");
-    fprintf(stderr, "   When you got ready, press any key.");
-    fflush(stdin);  getch();
-    fprintf(stderr, "Now I guide you to the starting position.\n");
-    
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "再生モードを開始します。\n");
+        fprintf(stderr, "スタイラスをキャリブレーション位置から外し、手に持ってください。\n");
+        fprintf(stderr, "これからスタイラスを開始位置まで案内します。\n");
+        fprintf(stderr, "準備ができたら、何かキーを押してください。\n");
+    }
+    else {
+        fprintf(stderr, "Replay mode :\n");
+        fprintf(stderr, "   Please remove stylus from calibration well, and hold any position.\n");
+        fprintf(stderr, "   When you got ready, press any key.");
+    }
+
+    fflush(stdin);
+    getch();
+
+    if (strcmp(Language, "ja") == 0) {
+    }
+    else {
+        fprintf(stderr, "Now I guide you to the starting position.\n");
+    }
+
     wellPos[0] = replay_position_resample[0][0];
     wellPos[1] = replay_position_resample[0][1];
     wellPos[2] = replay_position_resample[0][2];
     ReplayMode = true;
 
-    fprintf(stderr, "When your stylus moved to start position, press any key.\n");
-    fflush(stdin);  getch();
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "スタイラスが開始位置まで移動したら、何かキーを押してください。\n");
+    }
+    else {
+        fprintf(stderr, "When your stylus moved to start position, press any key.\n");
+    }
 
-    printf("Replay starts after 3 sec.count.");
+    fflush(stdin);
+    getch();
+
+    if (strcmp(Language, "ja") == 0) {
+        printf("3秒後に再生を開始します。\n");
+    }
+    else {
+        printf("Replay starts after 3 sec.count.");
+    }
+
     for (i = 3; i > 0; --i) {
         printf("%d   ", i);
         Sleep(1000);
     }
-    printf("...go!\n");
-  
-    // replay 
+
+    if (strcmp(Language, "ja") == 0) {
+        printf("開始します。\n");
+    }
+    else {
+        printf("...go!\n");
+    }
+
+    // replay
     now = time_replay_start = timeGetTime();
-    
-    for (i_resample = 1; i_resample < (end_idx_resample-1); ++i_resample) {
+
+    for (i_resample = 1; i_resample < (end_idx_resample - 1); ++i_resample) {
         time_next = time_replay_start + replay_timeidx_resample[i_resample];
 
-            while (now < time_next) { //wait until next time
-                now = timeGetTime();
-            }
-            // move gravity well
-            memcpy(wellPos, replay_position_resample[i_resample], sizeof(hduVector3Dd));
+        while (now < time_next) { // wait until next time
+            now = timeGetTime();
+        }
 
-
+        // move gravity well
+        memcpy(wellPos, replay_position_resample[i_resample],
+            sizeof(hduVector3Dd));
     }
 
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "再生が終了しました。何かキーを押してください。\n");
+    }
+    else {
+        fprintf(stderr, "press any key to quit replay mode.\n");
+    }
 
+    fflush(stdin);
+    getch();
 
-    
-    fprintf(stderr, "press any key to quit replay mode.\n");
-    fflush(stdin); getch();
     ReplayMode = false;
-    fprintf(stderr, "replay mode disabled.\n");
-    return;
+
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "再生モードを終了しました。\n");
     }
+    else {
+        fprintf(stderr, "replay mode disabled.\n");
+    }
+
+    return;
+}
 
 
 bool read_resampled_ReplayData(const char* filename) {
@@ -607,18 +683,22 @@ void writeResampledReplayData() {
 *******************************************************************************/
 int main(int argc, char* argv[])
 {
-    const char* replayFilename = NULL;
-    bool autoPlay = false;
+const char* replayFilename = NULL;
+bool autoPlay = false;
 
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
-            replayFilename = argv[++i];
-        }
-        else if (strcmp(argv[i], "--play") == 0) {
-            autoPlay = true;
-        }
+for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+        replayFilename = argv[++i];
     }
+    else if (strcmp(argv[i], "--play") == 0) {
+        autoPlay = true;
+    }
+    else if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+        Language = argv[++i];
+    }
+}
 
+printf("Language: %s\n", Language);
 
 
     HDErrorInfo error;
@@ -634,8 +714,16 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    printf("Guide and Record motion Demo!\n");
-    printf("Found device model: %s.\n\n", hdGetString(HD_DEVICE_MODEL_TYPE));
+    if (strcmp(Language, "ja") == 0) {
+        printf("RnR ガイド・記録モーションデモ\n");
+        printf("接続されたデバイス: %s\n\n",
+            hdGetString(HD_DEVICE_MODEL_TYPE));
+    }
+    else {
+        printf("Guide and Record motion Demo!\n");
+        printf("Found device model: %s.\n\n",
+            hdGetString(HD_DEVICE_MODEL_TYPE));
+    }
 
     if (!initDemo())
     {
@@ -670,7 +758,9 @@ int main(int argc, char* argv[])
     }
 
     /* Start the main application loop */
-    mainLoop();
+    if (!autoPlay) {
+        mainLoop();
+    }
 
     /* For cleanup, unschedule callback and stop the scheduler. */
     hdStopScheduler();
@@ -828,29 +918,51 @@ bool initDemo(void)
 {
     HDErrorInfo error;
     int calibrationStyle;
-    printf("Calibration\n");
+    if (strcmp(Language, "ja") == 0) {
+        printf("キャリブレーションを行います。\n");
+    }
+    else {
+        printf("Calibration\n");
+    }
 
     hdGetIntegerv(HD_CALIBRATION_STYLE, &calibrationStyle);
     if (calibrationStyle & HD_CALIBRATION_AUTO || calibrationStyle & HD_CALIBRATION_INKWELL)
     {
-        printf("Please prepare for starting the demo by \n");
-        printf("placing the device at its reset position.\n\n");
-        printf("Press any key to continue...\n");
+        if (strcmp(Language, "ja") == 0) {
+            printf("デバイスをリセット位置に置いてください。\n");
+            printf("準備ができたら、何かキーを押してください。\n");
+        }
+        else {
+            printf("Please prepare for starting the demo by \n");
+            printf("placing the device at its reset position.\n\n");
+            printf("Press any key to continue...\n");
+        }
         getch();
         return 1;
     }
     if (calibrationStyle & HD_CALIBRATION_ENCODER_RESET )
     {
-        printf("Please prepare for starting the demo by \n");
-        printf("placing the device at its reset position.\n\n");
-        printf("Press any key to continue...\n");
+        if (strcmp(Language, "ja") == 0) {
+            printf("デバイスをリセット位置に置いてください。\n");
+            printf("準備ができたら、何かキーを押してください。\n");
+        }
+        else {
+            printf("Please prepare for starting the demo by \n");
+            printf("placing the device at its reset position.\n\n");
+            printf("Press any key to continue...\n");
+        }
 
         getch();
 
         hdUpdateCalibration(calibrationStyle);
         if (hdCheckCalibration() == HD_CALIBRATION_OK)
         {
-            printf("Calibration complete.\n\n");
+            if (strcmp(Language, "ja") == 0) {
+                printf("キャリブレーションが完了しました。\n\n");
+            }
+            else {
+                printf("Calibration complete.\n\n");
+            }
             return 1;
         }
         if (HD_DEVICE_ERROR(error = hdGetError()))
