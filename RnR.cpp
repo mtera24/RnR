@@ -118,35 +118,48 @@ void PrintCwd()
 
 void PrintHelp()
 {
-    static const char help_en[] = { \
-"GuideAndRecord Help\n\
----\n\
-L: Load replay data\n\
-G: Guide mode start\n\
-R: Record mode start\n\
-D: Load Recorded data\n\
-P: Prints device state\n\
-C: Continuously prints device state\n\
-A: Load and resample RAW replay data \n\
-W: Write resampled replay data(debug)\n\
-H: Prints help menu\n\
-Q: Quits the program\n\
----" };
+    static const char help_en[] =
 
-    static const char help_ja[] = { \
-"GuideAndRecord ヘルプ\n\
----\n\
-L: 再生データを読み込む\n\
-G: ガイドモードを開始する\n\
-R: 記録モードを開始する\n\
-D: 記録データを読み込む\n\
-P: デバイスの状態を表示する\n\
-C: デバイスの状態を連続して表示する\n\
-A: RAW再生データを読み込み、リサンプリングする\n\
-W: リサンプリングした再生データを書き出す（デバッグ用）\n\
-H: ヘルプメニューを表示する\n\
-Q: プログラムを終了する\n\
----" };
+        "GuideAndRecord Help\n"
+        "---\n"
+        "Touch stylus controls\n"
+        "Button 1: Start recording.\n"
+        "Press Button 1 again during recording to stop.\n"
+        "\n"
+        "Keyboard controls\n"
+        "R: Start recording.\n"
+        "Press any key during recording to stop.\n"
+        "L: Load replay data.\n"
+        "G: Start guide mode.\n"
+        "D: Load recorded data.\n"
+        "P: Print device state.\n"
+        "C: Continuously print device state.\n"
+        "A: Load and resample RAW replay data.\n"
+        "W: Write resampled replay data.\n"
+        "H: Show help.\n"
+        "Q: Quit the program.\n"
+        "---";
+
+    static const char help_ja[] =
+        "GuideAndRecord ヘルプ\n"
+        "---\n"
+        "Touchスタイラス操作\n"
+        "ボタン1：記録を開始します。\n"
+        "記録中にボタン1を再度押すと終了します。\n"
+        "\n"
+        "キーボード操作\n"
+        "R：記録を開始します。\n"
+        "記録中に何かキーを押すと終了します。\n"
+        "L：再生データを読み込みます。\n"
+        "G：ガイドモードを開始します。\n"
+        "D：記録データを読み込みます。\n"
+        "P：デバイスの状態を表示します。\n"
+        "C：デバイスの状態を連続表示します。\n"
+        "A：RAW再生データを読み込み、リサンプリングします。\n"
+        "W：リサンプリングデータを書き出します。\n"
+        "H：ヘルプを表示します。\n"
+        "Q：プログラムを終了します。\n"
+        "---";
 
     if (strcmp(Language, "ja") == 0) {
         printf("\n%s\n", help_ja);
@@ -159,10 +172,11 @@ Q: プログラムを終了する\n\
 }
 
 /* Synchronization structure. */
- typedef struct
+typedef struct
 {
-    HDdouble position[3]; /* mm */
-    HDdouble gimbalAngles[3];  /* rad */       
+    HDdouble position[3];
+    HDdouble gimbalAngles[3];
+    HDint buttons;
 } DeviceStateStruct;
 
 /*****************************************************************************
@@ -174,6 +188,7 @@ HDCallbackCode HDCALLBACK GetDeviceStateCallback(void *pUserData)
 
     hdGetDoublev(HD_CURRENT_POSITION, pState->position);
     hdGetDoublev(HD_CURRENT_GIMBAL_ANGLES, pState->gimbalAngles);
+    hdGetIntegerv(HD_CURRENT_BUTTONS, &pState->buttons);
 
     return HD_CALLBACK_DONE;
 }
@@ -209,6 +224,8 @@ void PrintDeviceState(HDboolean bContinuous)
         }
         printf("\n");
         
+        printf("Buttons: %d\n", state.buttons);
+
         if (bContinuous)
         {
 #if defined(WIN32)
@@ -230,6 +247,13 @@ void PrintDeviceState(HDboolean bContinuous)
 *****************************************************************************/
 void RecordDeviceState()
 {
+    // ボタン1が一度離されたかを記録する。
+    // 開始時に押していたボタンで、すぐ記録終了しないようにする。
+    bool button1Released = false;
+
+    // Touchの現在の状態を取得するための変数
+    DeviceStateStruct buttonState = {};
+
     /* # of record */
     // #define LEN_REC 10000
     /* interval for recording [ms]*/
@@ -248,17 +272,35 @@ void RecordDeviceState()
     //end_idx_record = end_idx_resample;
     //end_time = end_idx_record * INTV_REC / 1000.0; //sec
 
-    fprintf(stderr, "Now I record your motion in %f seconds.\n", lim_rec_time);
+    // Record開始前の案内
+// --lang ja の場合は日本語、それ以外は英語で表示する。
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "記録モードを開始します。\n");
+        fprintf(stderr, "記録可能時間は最大%.0f秒です。\n", lim_rec_time);
+        fprintf(stderr, "記録中はTouchのボタン1、またはキーボードのキーで終了できます。\n");
+        fprintf(stderr, "3秒後に記録を開始します。\n");
+    }
+    else {
+        fprintf(stderr, "Recording mode.\n");
+        fprintf(stderr, "Maximum recording time: %.0f seconds.\n", lim_rec_time);
+        fprintf(stderr, "Press Touch Button 1 or any keyboard key to stop recording.\n");
+        fprintf(stderr, "Recording starts in 3 seconds.\n");
+    }
 
-
-    fprintf(stderr, "Recording mode starts after 3 sec.count.");
-    for (i = 3; i > 0; --i) {
-        fprintf(stderr, "%d   ", i);
+    // 従来の3秒カウントダウンは維持する。
+    // NVDAとの同期問題は、後の段階で別途改善する。
+    for (int i = 3; i > 0; --i) {
+        fprintf(stderr, "%d\n", i);
         Sleep(1000);
     }
-    fprintf(stderr,"...go!\n");
-    fprintf(stderr,"### hit any key to end record ###\n");
 
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "記録を開始しました。\n");
+    }
+    else {
+        fprintf(stderr, "Recording started.\n");
+    }
+    
     now = time_start = timeGetTime();
 
     hdScheduleSynchronous(GetDeviceStateCallback, &state,
@@ -284,8 +326,30 @@ void RecordDeviceState()
         memcpy(rec_gimbalAngles[t], state.gimbalAngles, sizeof(hduVector3Dd));
         rec_timeidx[t] = now;
         ++t;
-    } while (!_kbhit() && t < LEN_REC); // exit when key press or time limit.
-    
+
+        // Touchの現在のボタン状態を取得する
+        hdScheduleSynchronous(
+            GetDeviceStateCallback,
+            &buttonState,
+            HD_DEFAULT_SCHEDULER_PRIORITY
+        );
+
+        // ボタン1が押されているか調べる
+        bool button1Pressed =
+            (buttonState.buttons & HD_DEVICE_BUTTON_1) != 0;
+
+        // ボタン1が離されたことを確認する
+        if (!button1Pressed) {
+            button1Released = true;
+        }
+
+        // 一度離された後、再び押されたら記録を終了する
+        if (button1Released && button1Pressed) {
+            break;
+        }
+
+    } while (!_kbhit() && t < LEN_REC);
+
     end_idx_record = t;
 
 //#if defined(WIN32)
@@ -304,24 +368,24 @@ void RecordDeviceState()
         rec_timeidx[t] -= time_start;
     }
     
-    for (t = 0; t < end_idx_record; ++t) {
-        int i;
-        printf("time:%d: ", rec_timeidx[t]);
-        printf("Current position (mm):");
-        for (i = 0; i < 3; i++)
-        {
-            printf(" %f", rec_position[t][i]);
-        }
-        //printf("\n");
+    //for (t = 0; t < end_idx_record; ++t) {
+    //    int i;
+    //    printf("time:%d: ", rec_timeidx[t]);
+    //    printf("Current position (mm):");
+    //    for (i = 0; i < 3; i++)
+    //    {
+    //        printf(" %f", rec_position[t][i]);
+    //    }
+    //    //printf("\n");
 
-        printf("Current Gimbal Angles (rad):");
-        for (i = 0; i < 3; i++)
-        {
-            printf(" %f", rec_gimbalAngles[t][i]);
-        }
-        printf("\n");
+    //    printf("Current Gimbal Angles (rad):");
+    //    for (i = 0; i < 3; i++)
+    //    {
+    //        printf(" %f", rec_gimbalAngles[t][i]);
+    //    }
+    //    printf("\n");
 
-    }
+    //}
     // write to file
     fp_rec_csv = fopen(FNAME_REC, "w");
     if (fp_rec_csv==NULL) {
@@ -350,8 +414,21 @@ void RecordDeviceState()
         }
         fclose(fp_rec_csv);
     }
-    fprintf(stderr, "record end.total time %d time steps.\n",end_idx_record);
+    // Record終了後は、NVDAが読み上げやすいように
+    // 詳細な数値ではなく、記録結果の要約だけを表示する。
+    double recordedSeconds =
+        rec_timeidx[end_idx_record - 1] / 1000.0;
 
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr,
+            "記録終了。記録時間 %.1f 秒、記録点数 %d 点。%s に保存しました。\n",
+            recordedSeconds, end_idx_record, FNAME_REC);
+    }
+    else {
+        fprintf(stderr,
+            "Recording finished. Duration %.1f seconds, %d samples. Saved to %s.\n",
+            recordedSeconds, end_idx_record, FNAME_REC);
+    }
 }
 
 /*****************************************************************************
@@ -727,12 +804,24 @@ printf("Language: %s\n", Language);
 
     if (!initDemo())
     {
-        printf("Demo Initialization failed\n");
-        printf("Press any key to exit\n");
-        getch();
-        
-    }
+        // キャリブレーションに失敗した場合は、
+        // 安全のためRnRの動作を開始しない。
 
+        if (strcmp(Language, "ja") == 0) {
+            printf("デバイスの初期化に失敗しました。\n");
+            printf("RnRを終了します。\n");
+        }
+        else {
+            printf("Device initialization failed.\n");
+            printf("RnR will exit.\n");
+        }
+
+        // デバイスを解放する
+        hdDisableDevice(hHD);
+
+        // プログラムを異常終了する
+        return -1;
+    }
     /* Schedule the main callback that will render forces to the device. */
     hGravityWell = hdScheduleAsynchronous(
         guideAndRecordCallback, 0, 
@@ -779,8 +868,47 @@ void mainLoop()
 {
     int keypress;
 
+    HDint previousButtons = 0;
+    DeviceStateStruct buttonState = {};
+
     while (TRUE)
     {
+        // Record処理から戻ったら、ボタン状態を更新する。
+        // 記録終了時の押下を、新しい開始操作と誤認しないため。
+        hdScheduleSynchronous(
+            GetDeviceStateCallback,
+            &buttonState,
+            HD_DEFAULT_SCHEDULER_PRIORITY
+        );
+
+        HDint currentButtons = buttonState.buttons;
+
+        // ボタン1の押下瞬間を検出
+        if ((currentButtons & HD_DEVICE_BUTTON_1) &&
+            !(previousButtons & HD_DEVICE_BUTTON_1))
+        {
+            printf("Button 1: Record start\n");
+
+            // 記録開始から終了、CSV保存まで実行
+            RecordDeviceState();
+            // 記録終了後、通常メニューを表示する
+            PrintHelp();
+
+            // 記録終了後のボタン状態を再取得
+            hdScheduleSynchronous(
+                GetDeviceStateCallback,
+                &buttonState,
+                HD_DEFAULT_SCHEDULER_PRIORITY
+            );
+
+            // 次の押下判定に備える
+            previousButtons = buttonState.buttons;
+        }
+        else {
+            // 通常時は今回の状態を次回比較用に保存
+            previousButtons = currentButtons;
+        }
+
         if (_kbhit())
         {
             keypress = getch();
@@ -918,6 +1046,65 @@ bool initDemo(void)
 {
     HDErrorInfo error;
     int calibrationStyle;
+
+    // 現在のキャリブレーション状態を取得する
+    HDenum calibrationStatus = hdCheckCalibration();
+
+    // Touchが対応しているキャリブレーション方式を取得する
+    hdGetIntegerv(HD_CALIBRATION_STYLE, &calibrationStyle);
+
+    // 対応方式を表示する
+    printf("Calibration styles:\n");
+
+    if (calibrationStyle & HD_CALIBRATION_AUTO) {
+        printf("  AUTO\n");
+    }
+
+    if (calibrationStyle & HD_CALIBRATION_INKWELL) {
+        printf("  INKWELL\n");
+    }
+
+    if (calibrationStyle & HD_CALIBRATION_ENCODER_RESET) {
+        printf("  ENCODER_RESET\n");
+    }
+
+    // 状態に応じたメッセージを表示する
+    switch (calibrationStatus)
+    {
+    case HD_CALIBRATION_OK:
+        printf("Calibration status: OK\n");
+        break;
+
+    case HD_CALIBRATION_NEEDS_UPDATE:
+        printf("Calibration status: NEEDS_UPDATE\n");
+        break;
+
+    case HD_CALIBRATION_NEEDS_MANUAL_INPUT:
+        printf("Calibration status: NEEDS_MANUAL_INPUT\n");
+        break;
+
+    default:
+        printf("Calibration status: UNKNOWN (%d)\n",
+            calibrationStatus);
+        break;
+    }
+
+    // 現在のキャリブレーション状態を確認
+    //HDenum calibrationStatus = hdCheckCalibration();
+
+    // キャリブレーション済みなら、そのまま終了する
+    if (calibrationStatus == HD_CALIBRATION_OK) {
+        if (strcmp(Language, "ja") == 0) {
+            printf("キャリブレーション済みです。\n");
+        }
+        else {
+            printf("Device is already calibrated.\n");
+        }
+
+        return true;
+    }
+
+    // 以下は既存の処理をそのまま残す
     if (strcmp(Language, "ja") == 0) {
         printf("キャリブレーションを行います。\n");
     }
@@ -926,20 +1113,53 @@ bool initDemo(void)
     }
 
     hdGetIntegerv(HD_CALIBRATION_STYLE, &calibrationStyle);
-    if (calibrationStyle & HD_CALIBRATION_AUTO || calibrationStyle & HD_CALIBRATION_INKWELL)
+
+    if (calibrationStyle & HD_CALIBRATION_INKWELL)
     {
+        // INKWELL方式では、スタイラスをインクウェルに戻して
+        // キャリブレーションが完了するのを待つ。
+
         if (strcmp(Language, "ja") == 0) {
-            printf("デバイスをリセット位置に置いてください。\n");
-            printf("準備ができたら、何かキーを押してください。\n");
+            printf("キャリブレーションが必要です。\n");
+            printf("スタイラスをインクウェルにカチッとはめ込んでください。\n");
+            printf("完了するまでお待ちください。\n");
         }
         else {
-            printf("Please prepare for starting the demo by \n");
-            printf("placing the device at its reset position.\n\n");
-            printf("Press any key to continue...\n");
+            printf("Calibration is required.\n");
+            printf("Place the stylus firmly into the inkwell until it clicks into place.\n");
+            printf("Please wait for calibration to complete.\n");
         }
-        getch();
-        return 1;
+
+        // 最大30秒間、キャリブレーション状態を確認する。
+        for (int i = 0; i < 300; i++)
+        {
+            if (hdCheckCalibration() == HD_CALIBRATION_OK)
+            {
+                if (strcmp(Language, "ja") == 0) {
+                    printf("キャリブレーションが完了しました。\n");
+                }
+                else {
+                    printf("Calibration complete.\n");
+                }
+
+                return true;
+            }
+
+            // 100ミリ秒待ってから再確認する。
+            Sleep(100);
+        }
+
+        // 30秒経過しても完了しなかった場合
+        if (strcmp(Language, "ja") == 0) {
+            printf("キャリブレーションが完了しませんでした。\n");
+        }
+        else {
+            printf("Calibration did not complete.\n");
+        }
+
+        return false;
     }
+
     if (calibrationStyle & HD_CALIBRATION_ENCODER_RESET )
     {
         if (strcmp(Language, "ja") == 0) {
