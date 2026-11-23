@@ -823,7 +823,23 @@ bool read_resampled_ReplayData(const char* filename) {
     }
     // store end of index for resample
     end_idx_resample = i + 1;
-    fprintf(stderr, "Replay resampled data loaded. total %d elements.\n", end_idx_resample);
+
+    // Replayデータの読み込み完了を利用者に通知する。
+    // 読み込み件数は操作結果の確認に必要なため、通常モードでも表示する。
+    // ファイル名は診断情報としてVerboseモードでのみ追加表示する。
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "再生データを読み込みました。%d点。\n",
+            end_idx_resample);
+    }
+    else {
+        fprintf(stderr, "Replay data loaded. %d elements.\n",
+            end_idx_resample);
+    }
+
+    if (VerboseMode) {
+        fprintf(stderr, "Replay file: %s\n", filename);
+    }
+
     ReplayReady = true;
     return true;
 }
@@ -862,8 +878,21 @@ void read_RecordData() {
     }
     // store end of index for resample
     end_idx_resample = i + 1;
-    fprintf(stderr, "Replay resampled data loaded. total %d elements.\n", end_idx_resample);
+    // Recordデータの読み込み完了を利用者に通知する。
+    // 読み込み件数は通常モードでも表示する。
+    // 元データの種類がRecordであることを明確にする。
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "記録データを読み込みました。%d点。\n",
+            end_idx_resample);
+    }
+    else {
+        fprintf(stderr, "Record data loaded. %d elements.\n",
+            end_idx_resample);
+    }
 
+    if (VerboseMode) {
+        fprintf(stderr, "Source file: %s\n", FNAME_REC);
+    }
     ReplayReady = true;
     return;
 }
@@ -901,7 +930,19 @@ void read_raw_ReplayData() {
             }
         }
     }
-    fprintf(stderr, "Replay raw data loaded. total %d elements.\n", i);
+    // RAW Replayデータの読み込み完了を利用者に通知する。
+    // 読み込み件数は通常モードでも表示する。
+    // RAWデータであることを明示し、通常のReplayデータと区別する。
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "RAW再生データを読み込みました。%d点。\n", i);
+    }
+    else {
+        fprintf(stderr, "RAW Replay data loaded. %d elements.\n", i);
+    }
+
+    if (VerboseMode) {
+        fprintf(stderr, "Source file: %s\n", FNAME_REPLAY);
+    }
     ReplayReady = true;
     return;
 }
@@ -941,14 +982,32 @@ void resampleReplayData() {
         // set resampled array
         replay_timeidx_resample[i_resample] = replay_timeidx_raw[i];
         memcpy(replay_position_resample[i_resample], replay_position_raw[i], sizeof(hduVector3Dd));
-        fprintf(stderr, "resample :index:%d  resampled time %d , raw time  %d.\n",
-            i_resample, replay_timeidx_resample[i_resample], replay_timeidx_raw[i]);
+        // リサンプリングの各点の処理状況は、開発・検証用の詳細情報。
+      // 通常モードでは出力せず、Verboseモードでも表示しない.
+      //  if (VerboseMode) {
+       //     fprintf(stderr, "resample :index:%d  resampled time %d , raw time  %d.\n",
+       //         i_resample, replay_timeidx_resample[i_resample], replay_timeidx_raw[i]);
+       // }
         
         // store end of index for resample
         end_idx_resample = i_resample + 1;
 
 
     }
+
+    // リサンプリングの完了と生成データ数を利用者に通知する。
+// 処理結果の確認に必要なため、通常モードでも表示する。
+    if (strcmp(Language, "ja") == 0) {
+        fprintf(stderr, "リサンプリングが完了しました。%d点。\n",
+            end_idx_resample);
+    }
+    else {
+        fprintf(stderr, "Resampling completed. %d points.\n",
+            end_idx_resample);
+    }
+
+    return;
+
     return;
 }
 
