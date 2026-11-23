@@ -35,6 +35,7 @@ Description:
 #if defined(WIN32)
 # include <windows.h>
 # include <conio.h>
+# include <mmsystem.h>  // Windows音声再生API
 #pragma comment(lib, "winmm.lib")
 #else
 #include <time.h>
@@ -53,6 +54,7 @@ static bool ReplayMode = false;
 static bool ReplayReady = false; // whether replay data loaded or not.
 
 static const char* Language = "en";
+static bool VerboseMode = false;
 
 /* # of record */
 #define LEN_REC 10000
@@ -99,6 +101,208 @@ HDSchedulerHandle hGravityWell = HD_INVALID_HANDLE;
 
 void mainLoop(void);
 bool initDemo(void);
+
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+// 440Hzの正弦波を1秒分生成する。
+// 後でwaveOutによる連続再生に使用する。
+std::vector<int16_t> CreateTone()
+{
+    const int sampleRate = 44100;
+    const double frequency = 440.0;
+    const double amplitude = 3000.0;
+    const double pi = 3.14159265358979323846;
+
+    std::vector<int16_t> samples(sampleRate);
+
+    for (int i = 0; i < sampleRate; ++i) {
+        double t = static_cast<double>(i) / sampleRate;
+
+        samples[i] = static_cast<int16_t>(
+            amplitude * std::sin(2.0 * pi * frequency * t)
+            );
+    }
+
+    return samples;
+}
+
+// 音声再生デバイスのハンドル
+HWAVEOUT hWaveOut = nullptr;
+
+// 音声デバイスを初期化する
+bool InitAudio()
+{
+    WAVEFORMATEX format = {};
+
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = 1;
+    format.nSamplesPerSec = 44100;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = 2;
+    format.nAvgBytesPerSec = 44100 * 2;
+
+    MMRESULT result = waveOutOpen(
+        &hWaveOut,
+        WAVE_MAPPER,
+        &format,
+        0,
+        0,
+        CALLBACK_NULL
+    );
+
+    return result == MMSYSERR_NOERROR;
+}
+
+// 二重バッファ方式で使用する音声データ
+// 2つのバッファを交互に再生し、音切れを防ぐ
+
+const int AUDIO_BUFFER_COUNT = 2;
+
+// 各バッファの音声データ
+std::vector<int16_t> toneSamples[AUDIO_BUFFER_COUNT];
+
+// 各バッファの再生管理情報
+WAVEHDR waveHeader[AUDIO_BUFFER_COUNT] = {};
+
+
+// 2つの音声バッファを準備する
+bool PrepareAudio()
+{
+    if (hWaveOut == nullptr) {
+        return false;
+    }
+
+    // 2つのバッファを順番に初期化する
+    for (int i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+
+        // 440Hzの正弦波を生成
+        toneSamples[i] = CreateTone();
+
+        // バッファ管理情報を初期化
+        waveHeader[i] = {};
+
+        // 音声データの場所とサイズを設定
+        waveHeader[i].lpData =
+            reinterpret_cast<LPSTR>(toneSamples[i].data());
+
+        waveHeader[i].dwBufferLength =
+            static_cast<DWORD>(
+                toneSamples[i].size() * sizeof(int16_t)
+                );
+
+        // Windowsの音声デバイスに登録
+        MMRESULT result = waveOutPrepareHeader(
+            hWaveOut,
+            &waveHeader[i],
+            sizeof(WAVEHDR)
+        );
+
+        if (result != MMSYSERR_NOERROR) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// 音声デバイスと2つのバッファを安全に解放する
+void CloseAudio()
+{
+    // 音声デバイスが開かれていなければ何もしない
+    if (hWaveOut == nullptr) {
+        return;
+    }
+
+    // 再生中の音声を停止する
+    waveOutReset(hWaveOut);
+
+    // 2つのバッファをそれぞれ解放する
+    for (int i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+
+        // 登録済みのバッファだけを解放する
+        if (waveHeader[i].dwFlags & WHDR_PREPARED) {
+            waveOutUnprepareHeader(
+                hWaveOut,
+                &waveHeader[i],
+                sizeof(WAVEHDR)
+            );
+        }
+    }
+
+    // 音声デバイスを閉じる
+    waveOutClose(hWaveOut);
+
+    hWaveOut = nullptr;
+}
+
+
+// 2つの音声バッファを再生キューに登録する
+bool StartAudio()
+{
+    if (hWaveOut == nullptr) {
+        return false;
+    }
+
+    // 2つのバッファを順番に登録する
+    for (int i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+
+        // バッファが準備されているか確認する
+        if (!(waveHeader[i].dwFlags & WHDR_PREPARED)) {
+            return false;
+        }
+
+        // すでに再生キューにあれば登録しない
+        if (waveHeader[i].dwFlags & WHDR_INQUEUE) {
+            continue;
+        }
+
+        // 音声バッファを再生キューへ登録する
+        MMRESULT result = waveOutWrite(
+            hWaveOut,
+            &waveHeader[i],
+            sizeof(WAVEHDR)
+        );
+
+        if (result != MMSYSERR_NOERROR) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// 音声再生を停止する
+void StopAudio()
+{
+    // 音声デバイスが初期化されていなければ何もしない
+    if (hWaveOut == nullptr) {
+        return;
+    }
+
+    // 再生中の音声を停止し、キューを空にする
+    waveOutReset(hWaveOut);
+}
+
+// 再生が完了した音声バッファがあるか確認する
+bool IsAudioFinished()
+{
+    if (hWaveOut == nullptr) {
+        return false;
+    }
+
+    // 2つのバッファを順番に確認する
+    for (int i = 0; i < AUDIO_BUFFER_COUNT; ++i) {
+
+        // 再生完了したバッファを検出
+        if (waveHeader[i].dwFlags & WHDR_DONE) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 void PrintCwd()
 {
@@ -168,7 +372,11 @@ void PrintHelp()
         printf("\n%s\n", help_en);
     }
 
-    PrintCwd();
+    // 作業ディレクトリはCSVの保存先確認などに使う診断情報。
+    // 通常モードではヘルプ表示時の不要な読み上げを抑える。
+    if (VerboseMode) {
+        PrintCwd();
+    }
 }
 
 /* Synchronization structure. */
@@ -250,6 +458,9 @@ void RecordDeviceState()
     // ボタン1が一度離されたかを記録する。
     // 開始時に押していたボタンで、すぐ記録終了しないようにする。
     bool button1Released = false;
+
+    // ボタン2の直前の押下状態
+    bool previousButton2Pressed = false;
 
     // Touchの現在の状態を取得するための変数
     DeviceStateStruct buttonState = {};
@@ -334,6 +545,32 @@ void RecordDeviceState()
             HD_DEFAULT_SCHEDULER_PRIORITY
         );
 
+        // ボタン2の現在の押下状態
+        bool button2Pressed =
+            (buttonState.buttons & HD_DEVICE_BUTTON_2) != 0;
+
+        // ボタン2が押された瞬間に音声再生を開始する
+        if (button2Pressed && !previousButton2Pressed) {
+            if (!StartAudio()) {
+                fprintf(stderr, "音声再生の開始に失敗しました。\n");
+            }
+        }
+
+        // ボタン2が離された瞬間に音声を停止する
+        if (!button2Pressed && previousButton2Pressed) {
+            StopAudio();
+        }
+
+        // ボタン2を押している間、再生済みバッファを補充する
+        if (button2Pressed && IsAudioFinished()) {
+            if (!StartAudio()) {
+                fprintf(stderr, "音声の連続再生に失敗しました。\n");
+            }
+        }
+
+        // 次回の判定に備えて状態を保存する
+        previousButton2Pressed = button2Pressed;
+
         // ボタン1が押されているか調べる
         bool button1Pressed =
             (buttonState.buttons & HD_DEVICE_BUTTON_1) != 0;
@@ -350,7 +587,11 @@ void RecordDeviceState()
 
     } while (!_kbhit() && t < LEN_REC);
 
+    // Record終了時は、ボタン2の状態にかかわらず音声を停止する
+    StopAudio();
+
     end_idx_record = t;
+
 
 //#if defined(WIN32)
 //            Sleep(INTV_REC);
@@ -773,10 +1014,20 @@ for (int i = 1; i < argc; ++i) {
     else if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
         Language = argv[++i];
     }
+
+ // --verbose が指定された場合、詳細表示モードを有効にする。
+// VerboseModeは初期値falseなので、指定がなければ通常モードになる。
+    else if (strcmp(argv[i], "--verbose") == 0) {
+        VerboseMode = true;
+    }
+
 }
 
-printf("Language: %s\n", Language);
-
+// 言語設定は開発時の確認情報なので、Verboseモードでのみ表示する。
+// 通常モードではNVDAによる不要な読み上げを抑える。
+if (VerboseMode) {
+    printf("Language: %s\n", Language);
+}
 
     HDErrorInfo error;
     /* Initialize the device, must be done before attempting to call any hd 
@@ -791,16 +1042,26 @@ printf("Language: %s\n", Language);
         return -1;
     }
 
+    // 接続デバイスの型番は開発・診断用の情報として扱う。
+ // 通常モードでは起動時の読み上げを減らすため表示しない。
+ // RnRの起動を示すタイトルは、どちらのモードでも表示する。
     if (strcmp(Language, "ja") == 0) {
         printf("RnR ガイド・記録モーションデモ\n");
-        printf("接続されたデバイス: %s\n\n",
-            hdGetString(HD_DEVICE_MODEL_TYPE));
+
+        if (VerboseMode) {
+            printf("接続されたデバイス: %s\n",
+                hdGetString(HD_DEVICE_MODEL_TYPE));
+        }
     }
     else {
         printf("Guide and Record motion Demo!\n");
-        printf("Found device model: %s.\n\n",
-            hdGetString(HD_DEVICE_MODEL_TYPE));
+
+        if (VerboseMode) {
+            printf("Found device model: %s.\n",
+                hdGetString(HD_DEVICE_MODEL_TYPE));
+        }
     }
+
 
     if (!initDemo())
     {
@@ -838,7 +1099,60 @@ printf("Language: %s\n", Language);
         return -1;
     }
 
-    PrintHelp();
+    // Windowsの音声出力デバイスを初期化する
+  // 音声デバイスの初期化失敗は操作に影響するため、
+// Verboseの設定にかかわらず、選択言語で通知する。
+    if (!InitAudio()) {
+        if (strcmp(Language, "ja") == 0) {
+            fprintf(stderr, "音声デバイスの初期化に失敗しました。\n");
+        }
+        else {
+            fprintf(stderr, "Failed to initialize audio device.\n");
+        }
+    }
+    else {
+        // 音声初期化の成功情報は診断用としてVerbose時のみ表示する。
+        // 初期化失敗や準備失敗は、通常モードでも必ず通知する。
+        if (VerboseMode) {
+            if (strcmp(Language, "ja") == 0) {
+                fprintf(stderr, "音声デバイスの初期化に成功しました。\n");
+            }
+            else {
+                fprintf(stderr, "Audio device initialized successfully.\n");
+            }
+        }
+
+        // 440Hzの音声データを登録する。
+        if (PrepareAudio()) {
+            if (VerboseMode) {
+                if (strcmp(Language, "ja") == 0) {
+                    fprintf(stderr, "音声データの準備に成功しました。\n");
+                }
+                else {
+                    fprintf(stderr, "Audio data prepared successfully.\n");
+                }
+            }
+        }
+        else {
+            if (strcmp(Language, "ja") == 0) {
+                fprintf(stderr, "音声データの準備に失敗しました。\n");
+            }
+            else {
+                fprintf(stderr, "Failed to prepare audio data.\n");
+            }
+        }
+    }
+
+
+    // 起動時にはヘルプ全文を表示せず、呼び出し方法だけを案内する。
+    // NVDAによる長い読み上げを避け、必要なときだけHキーで確認できるようにする。
+    // Verboseモードでもヘルプ全文は自動表示しない。
+    if (strcmp(Language, "ja") == 0) {
+        printf("操作方法を確認するにはHキーを押してください。\n");
+    }
+    else {
+        printf("Press H for help.\n");
+    }
 
     if (replayFilename != NULL) {
         if (read_resampled_ReplayData(replayFilename) && autoPlay) {
@@ -857,6 +1171,9 @@ printf("Language: %s\n", Language);
 
     /* Disable the device. */
     hdDisableDevice(hHD);
+
+    // 音声デバイスを解放する
+    CloseAudio();
 
     return 0;
 }
@@ -883,16 +1200,39 @@ void mainLoop()
 
         HDint currentButtons = buttonState.buttons;
 
+        // ボタン2の押下瞬間を検出する
+        if ((currentButtons & HD_DEVICE_BUTTON_2) &&
+            !(previousButtons & HD_DEVICE_BUTTON_2))
+        {
+            //printf("Button 2 detected.\n");
+
+            if (!StartAudio()) {
+                fprintf(stderr, "音声再生の開始に失敗しました。\n");
+            }
+            else {
+                //printf("StartAudio succeeded.\n");
+            }
+        }
+
+
+        // ボタン2の解放瞬間を検出する
+        if (!(currentButtons & HD_DEVICE_BUTTON_2) &&
+            (previousButtons & HD_DEVICE_BUTTON_2))
+        {
+            StopAudio();
+        }
+
+
         // ボタン1の押下瞬間を検出
         if ((currentButtons & HD_DEVICE_BUTTON_1) &&
             !(previousButtons & HD_DEVICE_BUTTON_1))
         {
             printf("Button 1: Record start\n");
 
-            // 記録開始から終了、CSV保存まで実行
+            // 記録開始から終了、CSV保存まで実行する。
+            // 終了後はヘルプを自動表示せず、記録結果の通知だけを残す。
+            // ヘルプは必要なときにHキーで呼び出せる。
             RecordDeviceState();
-            // 記録終了後、通常メニューを表示する
-            PrintHelp();
 
             // 記録終了後のボタン状態を再取得
             hdScheduleSynchronous(
@@ -909,25 +1249,43 @@ void mainLoop()
             previousButtons = currentButtons;
         }
 
+        // ボタン2が押されていて、音声再生が完了していたら
+// 同じ440Hzの音声データを再生する
+        if ((currentButtons & HD_DEVICE_BUTTON_2) &&
+            IsAudioFinished())
+        {
+            if (!StartAudio()) {
+                fprintf(stderr, "音声の連続再生に失敗しました。\n");
+            }
+        }
+
         if (_kbhit())
         {
             keypress = getch();
             keypress = toupper(keypress);
             
+            // 各コマンド実行後のヘルプ自動表示を廃止する。
+            // NVDAによる繰り返し読み上げを防ぐため、
+            // ヘルプ全文はHキーが押された場合にのみ表示する。
+            // Record・Replayなどの処理内容は変更しない。
             switch (keypress)
             {
-                case 'L': read_resampled_ReplayData(FNAME_REPLAY_RESAMPLE); PrintHelp(); break;
-                case 'G': ReplayDeviceState(); PrintHelp(); break;
-                case 'R': RecordDeviceState(); PrintHelp(); break;
-                case 'D': read_RecordData(); PrintHelp(); break;
+            case 'L': read_resampled_ReplayData(FNAME_REPLAY_RESAMPLE); break;
+            case 'G': ReplayDeviceState(); break;
+            case 'R': RecordDeviceState(); break;
+            case 'D': read_RecordData(); break;
 
-                case 'P': PrintDeviceState(FALSE); PrintHelp(); break;
-                case 'C': PrintDeviceState(TRUE); PrintHelp(); break;
-                case 'A': read_raw_ReplayData(); resampleReplayData(); PrintHelp(); break;
-                case 'W': writeResampledReplayData(); PrintHelp(); break;
-                case 'H': PrintHelp(); break;
-                case 'Q': return;
-                default: PrintHelp(); break;
+            case 'P': PrintDeviceState(FALSE); break;
+            case 'C': PrintDeviceState(TRUE); break;
+            case 'A': read_raw_ReplayData(); resampleReplayData(); break;
+            case 'W': writeResampledReplayData(); break;
+
+                // ヘルプは利用者が明示的に要求した場合だけ表示する。
+            case 'H': PrintHelp(); break;
+            case 'Q': return;
+
+                // 未定義キーではヘルプを自動表示しない。
+            default: break;
             }
         }
 
@@ -1053,40 +1411,49 @@ bool initDemo(void)
     // Touchが対応しているキャリブレーション方式を取得する
     hdGetIntegerv(HD_CALIBRATION_STYLE, &calibrationStyle);
 
-    // 対応方式を表示する
-    printf("Calibration styles:\n");
+    // 対応するキャリブレーション方式は診断用情報として扱う。
+    // 通常モードでは表示せず、NVDAによる不要な読み上げを抑える。
+    // 方式の取得とキャリブレーション処理自体は変更しない。
+    if (VerboseMode) {
+        printf("Calibration styles:\n");
 
-    if (calibrationStyle & HD_CALIBRATION_AUTO) {
-        printf("  AUTO\n");
+        if (calibrationStyle & HD_CALIBRATION_AUTO) {
+            printf("  AUTO\n");
+        }
+
+        if (calibrationStyle & HD_CALIBRATION_INKWELL) {
+            printf("  INKWELL\n");
+        }
+
+        if (calibrationStyle & HD_CALIBRATION_ENCODER_RESET) {
+            printf("  ENCODER_RESET\n");
+        }
     }
 
-    if (calibrationStyle & HD_CALIBRATION_INKWELL) {
-        printf("  INKWELL\n");
-    }
 
-    if (calibrationStyle & HD_CALIBRATION_ENCODER_RESET) {
-        printf("  ENCODER_RESET\n");
-    }
+    // キャリブレーション状態の詳細は診断用情報として扱う。
+   // 通常モードでは状態コードを表示せず、必要な操作案内だけを残す。
+   // 未知の状態も診断時に確認できるよう、Verboseでは表示する。
+    if (VerboseMode) {
+        switch (calibrationStatus)
+        {
+        case HD_CALIBRATION_OK:
+            printf("Calibration status: OK\n");
+            break;
 
-    // 状態に応じたメッセージを表示する
-    switch (calibrationStatus)
-    {
-    case HD_CALIBRATION_OK:
-        printf("Calibration status: OK\n");
-        break;
+        case HD_CALIBRATION_NEEDS_UPDATE:
+            printf("Calibration status: NEEDS_UPDATE\n");
+            break;
 
-    case HD_CALIBRATION_NEEDS_UPDATE:
-        printf("Calibration status: NEEDS_UPDATE\n");
-        break;
+        case HD_CALIBRATION_NEEDS_MANUAL_INPUT:
+            printf("Calibration status: NEEDS_MANUAL_INPUT\n");
+            break;
 
-    case HD_CALIBRATION_NEEDS_MANUAL_INPUT:
-        printf("Calibration status: NEEDS_MANUAL_INPUT\n");
-        break;
-
-    default:
-        printf("Calibration status: UNKNOWN (%d)\n",
-            calibrationStatus);
-        break;
+        default:
+            printf("Calibration status: UNKNOWN (%d)\n",
+                calibrationStatus);
+            break;
+        }
     }
 
     // 現在のキャリブレーション状態を確認
