@@ -1,0 +1,5 @@
+# format=RnR
+# version=1.0
+time_ms,x_mm,y_mm
+0,0,0
+10,1,0

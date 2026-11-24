@@ -31,9 +31,20 @@ Description:
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+
 #include <vector>
 #include <cstdint>
 #include <new>
+
+// CSVファイルの読み込み・文字列解析
+#include <fstream>
+#include <string>
+#include <sstream>
+
+#include <cmath>
+#include <stdexcept>
+
+#include <set>
 
 #if defined(WIN32)
 # include <windows.h>
@@ -915,6 +926,793 @@ bool read_resampled_ReplayData(const char* filename) {
     return true;
 }
 
+// 文字列の前後にある空白・タブ・改行文字を除去する。
+// 文字列内部の空白は変更しない。
+static std::string trim(const std::string& str)
+{
+    const std::string whitespace = " \t\r\n";
+
+    size_t first = str.find_first_not_of(whitespace);
+
+    // 空文字列、または空白文字だけの場合
+    if (first == std::string::npos)
+    {
+        return "";
+    }
+
+    size_t last = str.find_last_not_of(whitespace);
+
+    return str.substr(first, last - first + 1);
+}
+
+// CSVの1行をカンマで分割する。
+// 空欄も1つの列として保持する。
+// 引用符を含むCSVの解析には対応しない。
+static std::vector<std::string> splitCSVLine(
+    const std::string& line)
+{
+    std::vector<std::string> fields;
+    std::stringstream ss(line);
+    std::string field;
+
+    while (std::getline(ss, field, ','))
+    {
+        fields.push_back(field);
+    }
+
+    // 行末がカンマの場合、最後の空欄も保持する。
+    if (!line.empty() && line.back() == ',')
+    {
+        fields.push_back("");
+    }
+
+    return fields;
+}
+
+// 指定された列名に対応する列番号を返す。
+// 列番号は0から始まる。
+// 見つからない場合は-1を返す。
+static int findCSVColumn(
+    const std::vector<std::string>& columns,
+    const std::string& name)
+{
+    for (size_t i = 0; i < columns.size(); ++i)
+    {
+        if (trim(columns[i]) == name)
+        {
+            return static_cast<int>(i);
+        }
+    }
+
+    return -1;
+}
+
+// CSVの文字列を実数値に変換する。
+// 不正な文字列、変換可能範囲外の値、
+// NaN、無限大の場合はfalseを返す。
+static bool parseCSVDouble(
+    const std::string& field,
+    double& value)
+{
+    std::string str = trim(field);
+
+    if (str.empty())
+    {
+        return false;
+    }
+
+    try
+    {
+        size_t pos = 0;
+        double result = std::stod(str, &pos);
+
+        // 文字列全体が数値として解釈されたか確認する。
+        if (pos != str.size())
+        {
+            return false;
+        }
+
+        // NaNおよび無限大を拒否する。
+        if (!std::isfinite(result))
+        {
+            return false;
+        }
+
+        value = result;
+        return true;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+    catch (const std::out_of_range&)
+    {
+        return false;
+    }
+}
+
+// CSVの文字列を64ビット符号なし整数に変換する。
+// 負数、小数、空欄、範囲外の値は拒否する。
+static bool parseCSVUInt64(
+    const std::string& field,
+    uint64_t& value)
+{
+    std::string str = trim(field);
+
+    if (str.empty())
+    {
+        return false;
+    }
+
+    // 10進数字以外の文字を拒否する。
+    for (char c : str)
+    {
+        if (c < '0' || c > '9')
+        {
+            return false;
+        }
+    }
+
+    try
+    {
+        size_t pos = 0;
+        uint64_t result = std::stoull(str, &pos, 10);
+
+        if (pos != str.size())
+        {
+            return false;
+        }
+
+        value = result;
+        return true;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+    catch (const std::out_of_range&)
+    {
+        return false;
+    }
+}
+
+// CSVヘッダにおける各項目の列番号を管理する。
+// -1は、その列が存在しないことを示す。
+struct MotionCSVColumns
+{
+    // 必須列
+    int time_ms = -1;
+    int x_mm = -1;
+    int y_mm = -1;
+    int z_mm = -1;
+
+    // 省略可能な列
+    int gimbal1_rad = -1;
+    int gimbal2_rad = -1;
+    int gimbal3_rad = -1;
+    int buttons = -1;
+    int audio_freq_hz = -1;
+    int audio_amplitude = -1;
+};
+
+// RnR CSVファイルのメタデータを管理する。
+struct MotionCSVMetadata
+{
+    // 必須メタデータ
+    std::string format;
+    std::string version;
+
+    // 省略可能なメタデータ
+    std::string title;
+    std::string device;
+    std::string source;
+    std::string created_at;
+
+    // 公称サンプリング間隔 [ms]
+    // 空文字列は未指定を示す。
+    std::string nominal_interval_ms;
+
+    // 音出力情報の補間方式
+    // 未指定の場合は直前の値を保持する。
+    std::string interpolation_audio_freq = "hold";
+    std::string interpolation_audio_amplitude = "hold";
+};
+
+// 読み込んだCSVファイルのメタデータ
+static MotionCSVMetadata rawMetadata;
+
+// 読み込んだCSVファイルの列構成
+// 省略された項目と値がゼロの項目を区別するために保持する。
+static MotionCSVColumns rawColumns;
+
+// CSVファイルの読み込みと形式検査が
+// 正常に完了したことを示す。
+static bool RawDataReady = false;
+
+// メタデータ行をキーと値に分解する。
+// 書式は "# key=value" とする。
+// キーと値の前後にある空白は除去する。
+static bool splitCSVMetadata(
+    const std::string& line,
+    std::string& key,
+    std::string& value)
+{
+    std::string str = trim(line);
+
+    // メタデータ行の先頭は '#' でなければならない。
+    if (str.empty() || str[0] != '#')
+    {
+        return false;
+    }
+
+    // キーと値の区切り位置を取得する。
+    size_t pos = str.find('=');
+
+    if (pos == std::string::npos)
+    {
+        return false;
+    }
+
+    // '#' を除いた部分からキーを取得する。
+    key = trim(str.substr(1, pos - 1));
+
+    // 最初の '=' より後ろを値として取得する。
+    value = trim(str.substr(pos + 1));
+
+    // 空のキーは許容しない。
+    return !key.empty();
+}
+
+// メタデータのキーと値を構造体に格納する。
+// 同じキーが複数回出現した場合は拒否する。
+// 未知のキーは将来の仕様拡張に備えて無視する。
+static bool setCSVMetadata(
+    const std::string& key,
+    const std::string& value,
+    MotionCSVMetadata& metadata,
+    std::set<std::string>& seenKeys)
+{
+    // キーの重複を検査する。
+    if (!seenKeys.insert(key).second)
+    {
+        return false;
+    }
+
+    if (key == "format")
+        metadata.format = value;
+    else if (key == "version")
+        metadata.version = value;
+    else if (key == "title")
+        metadata.title = value;
+    else if (key == "device")
+        metadata.device = value;
+    else if (key == "source")
+        metadata.source = value;
+    else if (key == "created_at")
+        metadata.created_at = value;
+    else if (key == "nominal_interval_ms")
+        metadata.nominal_interval_ms = value;
+    else if (key == "interpolation_audio_freq")
+        metadata.interpolation_audio_freq = value;
+    else if (key == "interpolation_audio_amplitude")
+        metadata.interpolation_audio_amplitude = value;
+
+    return true;
+}
+
+// メタデータがRnR CSV Version 1.0の仕様に
+// 適合しているか検査する。
+static bool validateCSVMetadata(
+    const MotionCSVMetadata& metadata)
+{
+    // ファイル形式とバージョンを検査する。
+    if (metadata.format != "RnR" ||
+        metadata.version != "1.0")
+    {
+        return false;
+    }
+
+    // 公称サンプリング間隔 [ms]
+    // 指定されている場合は正の数値を要求する。
+    if (!metadata.nominal_interval_ms.empty())
+    {
+        double interval = 0.0;
+
+        if (!parseCSVDouble(
+            metadata.nominal_interval_ms, interval))
+        {
+            return false;
+        }
+
+        if (interval <= 0.0)
+        {
+            return false;
+        }
+    }
+
+    // 音の周波数の補間方式を検査する。
+    if (metadata.interpolation_audio_freq != "hold" &&
+        metadata.interpolation_audio_freq != "linear")
+    {
+        return false;
+    }
+
+    // 音の振幅の補間方式を検査する。
+    if (metadata.interpolation_audio_amplitude != "hold" &&
+        metadata.interpolation_audio_amplitude != "linear")
+    {
+        return false;
+    }
+
+    return true;
+}
+
+
+// CSVヘッダを解析し、各項目の列番号を設定する。
+// 列名の重複、空の列名、必須列の欠落を拒否する。
+static bool parseCSVHeader(
+    const std::vector<std::string>& fields,
+    MotionCSVColumns& columns)
+{
+    // 列名の重複および空欄を検査する。
+    for (size_t i = 0; i < fields.size(); ++i)
+    {
+        std::string name = trim(fields[i]);
+
+        if (name.empty())
+        {
+            return false;
+        }
+
+        for (size_t j = 0; j < i; ++j)
+        {
+            if (name == trim(fields[j]))
+            {
+                return false;
+            }
+        }
+    }
+
+    // 必須列の列番号を取得する。
+    columns.time_ms = findCSVColumn(fields, "time_ms");
+    columns.x_mm = findCSVColumn(fields, "x_mm");
+    columns.y_mm = findCSVColumn(fields, "y_mm");
+    columns.z_mm = findCSVColumn(fields, "z_mm");
+
+    // 必須列が1つでも欠落していれば読み込みを拒否する。
+    if (columns.time_ms < 0 ||
+        columns.x_mm < 0 ||
+        columns.y_mm < 0 ||
+        columns.z_mm < 0)
+    {
+        return false;
+    }
+
+    // 省略可能な列の列番号を取得する。
+    columns.gimbal1_rad = findCSVColumn(fields, "gimbal1_rad");
+    columns.gimbal2_rad = findCSVColumn(fields, "gimbal2_rad");
+    columns.gimbal3_rad = findCSVColumn(fields, "gimbal3_rad");
+    columns.buttons = findCSVColumn(fields, "buttons");
+    columns.audio_freq_hz = findCSVColumn(fields, "audio_freq_hz");
+    columns.audio_amplitude = findCSVColumn(fields, "audio_amplitude");
+
+    return true;
+}
+
+// CSVのデータ行から運動データを生成する。
+// 必須項目の欠落や不正な数値を拒否する。
+// fieldsにはヘッダと同じ列数が必要である。
+static bool parseCSVSample(
+    const std::vector<std::string>& fields,
+    const MotionCSVColumns& columns,
+    size_t expectedColumnCount,
+    MotionSample& sample)
+{
+    // ヘッダとデータ行の列数が一致するか検査する。
+    if (fields.size() != expectedColumnCount)
+    {
+        return false;
+    }
+
+    // 全メンバを初期状態に戻す。
+    sample = MotionSample{};
+
+    // 時刻 [ms]
+    if (!parseCSVUInt64(
+        fields[columns.time_ms], sample.time_ms))
+    {
+        return false;
+    }
+
+    // X座標 [mm]
+    if (!parseCSVDouble(
+        fields[columns.x_mm], sample.position[0]))
+    {
+        return false;
+    }
+
+    // Y座標 [mm]
+    if (!parseCSVDouble(
+        fields[columns.y_mm], sample.position[1]))
+    {
+        return false;
+    }
+
+    // Z座標 [mm]
+    if (!parseCSVDouble(
+        fields[columns.z_mm], sample.position[2]))
+    {
+        return false;
+    }
+
+    // ジンバル角度 [rad]
+// 対応する列が存在する場合だけ読み込む。
+// 列が存在しない場合は初期値を維持する。
+
+    if (columns.gimbal1_rad >= 0)
+    {
+        if (!parseCSVDouble(
+            fields[columns.gimbal1_rad],
+            sample.gimbalAngles[0]))
+        {
+            return false;
+        }
+    }
+
+    if (columns.gimbal2_rad >= 0)
+    {
+        if (!parseCSVDouble(
+            fields[columns.gimbal2_rad],
+            sample.gimbalAngles[1]))
+        {
+            return false;
+        }
+    }
+
+    if (columns.gimbal3_rad >= 0)
+    {
+        if (!parseCSVDouble(
+            fields[columns.gimbal3_rad],
+            sample.gimbalAngles[2]))
+        {
+            return false;
+        }
+    }
+
+    // ボタン状態（ビットマスク）
+// ボタン1とボタン2の組み合わせのみ許容する。
+    if (columns.buttons >= 0)
+    {
+        uint64_t buttons = 0;
+
+        if (!parseCSVUInt64(
+            fields[columns.buttons], buttons))
+        {
+            return false;
+        }
+
+        // 有効な値は0～3である。
+        if (buttons > 3)
+        {
+            return false;
+        }
+
+        sample.buttons = static_cast<uint32_t>(buttons);
+    }
+
+    // 音の周波数 [Hz]
+// 負の周波数は許容しない。
+    if (columns.audio_freq_hz >= 0)
+    {
+        if (!parseCSVDouble(
+            fields[columns.audio_freq_hz],
+            sample.audio_freq_hz))
+        {
+            return false;
+        }
+
+        if (sample.audio_freq_hz < 0.0)
+        {
+            return false;
+        }
+    }
+
+    // 音の振幅（0.0～1.0の正規化値）
+    if (columns.audio_amplitude >= 0)
+    {
+        if (!parseCSVDouble(
+            fields[columns.audio_amplitude],
+            sample.audio_amplitude))
+        {
+            return false;
+        }
+
+        if (sample.audio_amplitude < 0.0 ||
+            sample.audio_amplitude > 1.0)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// 新しいサンプルの時刻がCSV仕様に適合するか検査する。
+// 最初の時刻は0msとし、以降は厳密な単調増加を要求する。
+static bool validateCSVSampleTime(
+    const std::vector<MotionSample>& data,
+    const MotionSample& sample)
+{
+    // 最初のサンプルは時刻0msでなければならない。
+    if (data.empty())
+    {
+        return sample.time_ms == 0;
+    }
+
+    // 直前のサンプルより時刻が進んでいることを確認する。
+    return sample.time_ms > data.back().time_ms;
+}
+
+// RnR CSV Version 1.0形式のファイルを読み込む。
+// CSV形式の妥当性を検査する。
+// 実機再生の安全性検査は別の関数で行う。
+static bool readMotionCSV(const char* filename)
+try
+{
+    // 古いデータによる誤再生を防止する。
+    ReplayReady = false;
+    RawDataReady = false;
+
+    // 前回の読み込み結果を初期化する。
+    rawData.clear();
+    replayData.clear();
+
+    rawMetadata = MotionCSVMetadata{};
+    rawColumns = MotionCSVColumns{};
+
+    // CSVファイルを開く。
+    std::ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        fprintf(stderr,
+            "Cannot open file: %s\n", filename);
+
+        return false;
+    }
+
+    std::string line;
+    std::set<std::string> seenKeys;
+    size_t lineNumber = 0;
+    bool headerFound = false;
+
+    // メタデータを読み込み、最初のヘッダ行を取得する。
+    while (std::getline(file, line))
+    {
+        ++lineNumber;
+        line = trim(line);
+
+        // 空行は読み飛ばす。
+        if (line.empty())
+        {
+            continue;
+        }
+
+        // '#' で始まる行をメタデータとして解析する。
+        if (line[0] == '#')
+        {
+            std::string key;
+            std::string value;
+
+            if (!splitCSVMetadata(line, key, value) ||
+                !setCSVMetadata(
+                    key, value, rawMetadata, seenKeys))
+            {
+                fprintf(stderr,
+                    "Invalid metadata at line %zu.\n",
+                    lineNumber);
+
+                return false;
+            }
+        }
+        else
+        {
+            // 最初の非メタデータ行をヘッダ行とする。
+            headerFound = true;
+            break;
+        }
+    }
+
+    // ヘッダ行が存在することを確認する。
+    if (!headerFound)
+    {
+        fprintf(stderr, "CSV header not found.\n");
+        return false;
+    }
+
+    // メタデータがCSV仕様に適合するか検査する。
+    if (!validateCSVMetadata(rawMetadata))
+    {
+        fprintf(stderr, "Invalid CSV metadata.\n");
+        return false;
+    }
+
+    // ヘッダ行をカンマで分割する。
+    std::vector<std::string> headerFields =
+        splitCSVLine(line);
+
+    // 列名を解析し、各項目の列番号を取得する。
+    // 必須列の欠落や列名の重複があれば読み込みを中止する。
+    if (!parseCSVHeader(headerFields, rawColumns))
+    {
+        fprintf(stderr,
+            "Invalid CSV header at line %zu.\n",
+            lineNumber);
+
+        return false;
+    }
+
+    // データ行の列数検査に使用する。
+    const size_t expectedColumnCount =
+        headerFields.size();
+
+    // CSVのデータ行を1行ずつ読み込む。
+    while (std::getline(file, line))
+    {
+        ++lineNumber;
+        line = trim(line);
+
+        // 空行は読み飛ばす。
+        if (line.empty())
+        {
+            continue;
+        }
+
+        // データ行をカンマで分割する。
+        std::vector<std::string> fields =
+            splitCSVLine(line);
+
+        MotionSample sample;
+
+        // 各項目の数値および値域を検査する。
+        if (!parseCSVSample(
+            fields, rawColumns,
+            expectedColumnCount, sample))
+        {
+            fprintf(stderr,
+                "Invalid CSV data at line %zu.\n",
+                lineNumber);
+
+            rawData.clear();
+            return false;
+        }
+
+        // 時刻の単調増加を検査する。
+        if (!validateCSVSampleTime(rawData, sample))
+        {
+            fprintf(stderr,
+                "Invalid timestamp at line %zu.\n",
+                lineNumber);
+
+            rawData.clear();
+            return false;
+        }
+
+        // 検査に合格したサンプルを格納する。
+        rawData.push_back(sample);
+    }
+
+    // ファイルの読み込みが正常に終了したか検査する。
+    // EOFへの到達は正常終了として扱う。
+    if (file.bad() || !file.eof())
+    {
+        fprintf(stderr, "CSV file read error.\n");
+
+        rawData.clear();
+        return false;
+    }
+
+    // 運動データが1点も存在しない場合は拒否する。
+    if (rawData.empty())
+    {
+        fprintf(stderr, "CSV contains no motion data.\n");
+
+        return false;
+    }
+
+    // CSVの読み込みと形式検査が正常に完了した。
+    RawDataReady = true;
+
+    // 実機再生の安全性検査は未実施であるため、
+    // 再生許可は与えない。
+    ReplayReady = false;
+
+    // 読み込み結果を利用者に通知する。
+    if (strcmp(Language, "ja") == 0)
+    {
+        fprintf(stderr,
+            "CSVデータを読み込みました。%zu点。\n",
+            rawData.size());
+    }
+    else
+    {
+        fprintf(stderr,
+            "CSV data loaded. %zu samples.\n",
+            rawData.size());
+    }
+
+    // ファイル名はVerboseモードでのみ表示する。
+    if (VerboseMode)
+    {
+        fprintf(stderr,
+            "Source file: %s\n", filename);
+    }
+
+    return true;
+}
+
+catch (const std::bad_alloc&)
+{
+    // メモリ確保失敗時は読み込み結果を破棄し、
+    // 実機再生を禁止する。
+    RawDataReady = false;
+    ReplayReady = false;
+
+    rawData.clear();
+    replayData.clear();
+
+    if (strcmp(Language, "ja") == 0)
+    {
+        fprintf(stderr,
+            "メモリ確保に失敗しました。"
+            "CSV読み込みを中止します。\n");
+    }
+    else
+    {
+        fprintf(stderr,
+            "Memory allocation failed. "
+            "CSV loading cancelled.\n");
+    }
+
+    return false;
+}
+
+// 指定されたCSVファイルの読み込みを検証する。
+// Touchの運動制御は行わない。
+static void testReadMotionCSV(
+    const char* filename = FNAME_REC)
+{
+    bool result = readMotionCSV(filename);
+
+    fprintf(stderr, "\n--- CSV Load Test ---\n");
+
+    fprintf(stderr, "Result: %s\n",
+        result ? "true" : "false");
+
+    fprintf(stderr, "RawDataReady: %s\n",
+        RawDataReady ? "true" : "false");
+
+    fprintf(stderr, "ReplayReady: %s\n",
+        ReplayReady ? "true" : "false");
+
+    fprintf(stderr, "Samples: %zu\n",
+        rawData.size());
+
+    if (result && !rawData.empty())
+    {
+        fprintf(stderr, "First time: %llu ms\n",
+            static_cast<unsigned long long>(
+                rawData.front().time_ms));
+
+        fprintf(stderr, "Last time: %llu ms\n",
+            static_cast<unsigned long long>(
+                rawData.back().time_ms));
+    }
+
+    fprintf(stderr, "--- End of Test ---\n");
+}
+
+
 void read_RecordData() {
     FILE* fp_replay_csv = fopen(FNAME_REC, "rt");
     if (!fp_replay_csv) {
@@ -1123,8 +1921,11 @@ void writeResampledReplayData() {
 *******************************************************************************/
 int main(int argc, char* argv[])
 {
-const char* replayFilename = NULL;
-bool autoPlay = false;
+    const char* replayFilename = NULL;
+    bool autoPlay = false;
+
+    // CSV読み込み単体試験モード
+    bool testCSV = false;
 
 for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
@@ -1143,6 +1944,10 @@ for (int i = 1; i < argc; ++i) {
         VerboseMode = true;
     }
 
+    // CSV読み込み単体試験モードを有効にする。
+    else if (strcmp(argv[i], "--test-csv") == 0) {
+        testCSV = true;
+    }
 }
 
 // 言語設定は開発時の確認情報なので、Verboseモードでのみ表示する。
@@ -1151,8 +1956,24 @@ if (VerboseMode) {
     printf("Language: %s\n", Language);
 }
 
-    HDErrorInfo error;
-    /* Initialize the device, must be done before attempting to call any hd 
+// CSV単体試験モードではTouchを初期化せず、
+// CSV読み込み処理だけを実行して終了する。
+if (testCSV)
+{
+    // ファイル指定がなければ既定の記録CSVを使用する。
+    const char* testFilename =
+        (replayFilename != NULL)
+        ? replayFilename
+        : FNAME_REC;
+
+    testReadMotionCSV(testFilename);
+
+    return RawDataReady ? 0 : 1;
+}
+
+HDErrorInfo error;
+
+/* Initialize the device, must be done before attempting to call any hd
        functions. Passing in HD_DEFAULT_DEVICE causes the default device to be 
        initialized. */
     HHD hHD = hdInitDevice(HD_DEFAULT_DEVICE);
