@@ -759,6 +759,28 @@ void RecordDeviceState()
 *****************************************************************************/
 void ReplayDeviceState()
 {
+    // 新しいCSV読み込み処理への移行期間中は、
+    // 安全性検査が未実装のため実機再生を禁止する。
+    constexpr bool ENABLE_REPLAY = false;
+
+    if (!ENABLE_REPLAY)
+    {
+        if (strcmp(Language, "ja") == 0)
+        {
+            fprintf(stderr,
+                "安全性検査が未実装のため、"
+                "現在は再生できません。\n");
+        }
+        else
+        {
+            fprintf(stderr,
+                "Replay is disabled until "
+                "safety validation is implemented.\n");
+        }
+
+        return;
+    }
+
     DWORD now, time_replay_start, time_next;
 
     int i;
@@ -870,60 +892,15 @@ void ReplayDeviceState()
 }
 
 
-bool read_resampled_ReplayData(const char* filename) {
-    FILE* fp_replay_csv = fopen(filename, "rt");
-    if (!fp_replay_csv) {
-        fprintf(stderr, "Cannot open file: %s\n", filename);
-        ReplayReady = false;
-        return false;
-    }
-    char linebuf[LEN_LINE_CSV];
-    int i = 0;
-    int tmpTimeMsec;
-    double tmpT, tmpX, tmpY, tmpZ;
-    // read 1-line until EOF
-    while (fgets(linebuf, LEN_LINE_CSV, fp_replay_csv) != NULL) { // until encount EOF
+// 共通CSV読み込み関数の前方宣言
+static bool readMotionCSV(const char* filename);
 
-        if (linebuf[0] != '#') { // skip header line
-            sscanf(linebuf, "%lf,%lf,%lf,%lf", &tmpT, &tmpX, &tmpY, &tmpZ);
-            // convert time to msec
-            tmpTimeMsec = tmpT;
-            replay_timeidx_resample[i] = tmpTimeMsec;
-            replay_position_resample[i][0] = tmpX;
-            replay_position_resample[i][1] = tmpY;
-            replay_position_resample[i][2] = tmpZ;
-
-            ++i;
-            if (i < MAX_LEN_REPLAY_RAW) {
-                continue;
-            }
-            else {
-                fprintf(stderr, "Maximum data length reached. reading file terminated. \n");
-                break;
-            }
-        }
-    }
-    // store end of index for resample
-    end_idx_resample = i + 1;
-
-    // Replayデータの読み込み完了を利用者に通知する。
-    // 読み込み件数は操作結果の確認に必要なため、通常モードでも表示する。
-    // ファイル名は診断情報としてVerboseモードでのみ追加表示する。
-    if (strcmp(Language, "ja") == 0) {
-        fprintf(stderr, "再生データを読み込みました。%d点。\n",
-            end_idx_resample);
-    }
-    else {
-        fprintf(stderr, "Replay data loaded. %d elements.\n",
-            end_idx_resample);
-    }
-
-    if (VerboseMode) {
-        fprintf(stderr, "Replay file: %s\n", filename);
-    }
-
-    ReplayReady = true;
-    return true;
+// 指定されたCSVファイルを読み込み、rawDataに格納する。
+// CSV形式の検査結果を戻り値として返す。
+// この段階では実機再生を許可しない。
+bool read_resampled_ReplayData(const char* filename)
+{
+    return readMotionCSV(filename);
 }
 
 // 文字列の前後にある空白・タブ・改行文字を除去する。
@@ -1768,107 +1745,22 @@ static void testReadMotionCSV(
 }
 
 
-void read_RecordData() {
-    FILE* fp_replay_csv = fopen(FNAME_REC, "rt");
-    if (!fp_replay_csv) {
-        fprintf(stderr, "Cannot open file:%s\n", FNAME_REC);
-        exit(1);
-    }
-    char linebuf[LEN_LINE_CSV];
-    int i = 0;
-    int tmpTimeMsec;
-    double tmpT, tmpX, tmpY, tmpZ;
-    // read 1-line until EOF
-    while (fgets(linebuf, LEN_LINE_CSV, fp_replay_csv) != NULL) { // until encount EOF
-
-        if (linebuf[0] != '#') { // skip header line
-            sscanf(linebuf, "%lf,%lf,%lf,%lf", &tmpT, &tmpX, &tmpY, &tmpZ);
-            // convert time to msec
-            tmpTimeMsec = tmpT;
-            replay_timeidx_resample[i] = tmpTimeMsec;
-            replay_position_resample[i][0] = tmpX;
-            replay_position_resample[i][1] = tmpY;
-            replay_position_resample[i][2] = tmpZ;
-
-            ++i;
-            if (i < MAX_LEN_REPLAY_RAW) {
-                continue;
-            }
-            else {
-                fprintf(stderr, "Maximum data length reached. reading file terminated. \n");
-                break;
-            }
-        }
-    }
-    // store end of index for resample
-    end_idx_resample = i + 1;
-    // Recordデータの読み込み完了を利用者に通知する。
-    // 読み込み件数は通常モードでも表示する。
-    // 元データの種類がRecordであることを明確にする。
-    if (strcmp(Language, "ja") == 0) {
-        fprintf(stderr, "記録データを読み込みました。%d点。\n",
-            end_idx_resample);
-    }
-    else {
-        fprintf(stderr, "Record data loaded. %d elements.\n",
-            end_idx_resample);
-    }
-
-    if (VerboseMode) {
-        fprintf(stderr, "Source file: %s\n", FNAME_REC);
-    }
-    ReplayReady = true;
-    return;
+// Recordで保存したCSVファイルを読み込む。
+// CSV形式の検査を行い、rawDataに格納する。
+// この段階では実機再生を許可しない。
+void read_RecordData()
+{
+    readMotionCSV(FNAME_REC);
 }
 
 
-void read_raw_ReplayData() {
-    FILE* fp_replay_csv = fopen(FNAME_REPLAY, "rt");
-    if (!fp_replay_csv) {
-        fprintf(stderr, "Cannot open file:%s\n", FNAME_REPLAY);
-        exit(1);
-    }
-    char linebuf[LEN_LINE_CSV];
-    int i = 0;
-    int tmpTimeMsec;
-    double tmpT,tmpX, tmpY, tmpZ;
-    // read 1-line until EOF
-    while (fgets(linebuf, LEN_LINE_CSV, fp_replay_csv) != NULL) { // until encount EOF
-
-        if (linebuf[0] != '#') { // skip header line
-            sscanf(linebuf, "%lf,%lf,%lf,%lf", &tmpT, &tmpX, &tmpY, &tmpZ);
-            // convert time to msec
-            tmpTimeMsec = tmpT * 1000;
-            replay_timeidx_raw[i] = tmpTimeMsec;
-            replay_position_raw[i][0] = tmpX;
-            replay_position_raw[i][1] = tmpY;
-            replay_position_raw[i][2] = tmpZ;
-
-            ++i;
-            if (i < MAX_LEN_REPLAY_RAW) {
-                continue;
-            }
-            else {
-                fprintf(stderr, "Maximum data length reached. reading file terminated. \n");
-                break;
-            }
-        }
-    }
-    // RAW Replayデータの読み込み完了を利用者に通知する。
-    // 読み込み件数は通常モードでも表示する。
-    // RAWデータであることを明示し、通常のReplayデータと区別する。
-    if (strcmp(Language, "ja") == 0) {
-        fprintf(stderr, "RAW再生データを読み込みました。%d点。\n", i);
-    }
-    else {
-        fprintf(stderr, "RAW Replay data loaded. %d elements.\n", i);
-    }
-
-    if (VerboseMode) {
-        fprintf(stderr, "Source file: %s\n", FNAME_REPLAY);
-    }
-    ReplayReady = true;
-    return;
+// RAW運動データをCSVファイルから読み込む。
+// 時刻の単位はCSV Version 1.0に従い[ms]とする。
+// 読み込んだデータはrawDataに格納する。
+// この段階では実機再生を許可しない。
+void read_raw_ReplayData()
+{
+    readMotionCSV(FNAME_REPLAY);
 }
 
 
@@ -2275,8 +2167,24 @@ void mainLoop()
 
             case 'P': PrintDeviceState(FALSE); break;
             case 'C': PrintDeviceState(TRUE); break;
-            case 'A': read_raw_ReplayData(); resampleReplayData(); break;
-            case 'W': writeResampledReplayData(); break;
+                // 新しいリサンプリング処理が完成するまでは、
+                // RAWデータの読み込みだけを行う。
+            case 'A': read_raw_ReplayData(); break;
+                // 新しいCSV書き出し処理が完成するまでは、
+                // 旧固定長配列からの書き出しを禁止する。
+            case 'W':
+                if (strcmp(Language, "ja") == 0)
+                {
+                    fprintf(stderr,
+                        "現在、CSV書き出し機能は停止中です。\n");
+                }
+                else
+                {
+                    fprintf(stderr,
+                        "CSV export is temporarily disabled.\n");
+                }
+                break;
+
 
                 // ヘルプは利用者が明示的に要求した場合だけ表示する。
             case 'H': PrintHelp(); break;
