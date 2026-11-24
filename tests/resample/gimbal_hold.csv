@@ -1,0 +1,6 @@
+# format=RnR
+# version=1.0
+time_ms,x_mm,y_mm,z_mm,gimbal1_rad,gimbal2_rad,gimbal3_rad
+0,0,0,0,0.1,0.2,0.3
+15,15,0,0,0.4,0.5,0.6
+35,35,0,0,0.7,0.8,0.9

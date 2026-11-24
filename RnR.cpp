@@ -46,6 +46,8 @@ Description:
 
 #include <set>
 
+#include <algorithm>
+
 #if defined(WIN32)
 # include <windows.h>
 # include <conio.h>
@@ -111,9 +113,16 @@ static constexpr size_t MAX_RECORD_SAMPLES = 10000;
 #define LEN_LINE_CSV 1024
 // Maximum length of replay data (raw)
 #define MAX_LEN_REPLAY_RAW 20000
-// re-sampling interval[ms] for replay data
+// リサンプリングの基本時間間隔 [ms]
 #define INTV_RESAMPLE_REPLAY_MS 10
-// Maximum length of replay data (resample)
+
+// リサンプリングによる生成点数の暫定上限。
+// 過大なメモリ消費を防止するための制限であり、
+// 実機再生の安全性を保証するものではない。
+static constexpr size_t MAX_RESAMPLED_SAMPLES = 1000000;
+
+// 旧固定長配列用の上限。
+// 旧再生処理の廃止時に削除する。
 #define MAX_LEN_REPLAY_RESAMPLE 10000
 
 #define BUFSIZE MAX_PATH
@@ -1106,6 +1115,11 @@ static MotionCSVColumns rawColumns;
 // 正常に完了したことを示す。
 static bool RawDataReady = false;
 
+// リサンプリングが正常に完了し、
+// replayDataが生成されたことを示す。
+// 実機再生の安全性を保証するものではない。
+static bool ResampledDataReady = false;
+
 // メタデータ行をキーと値に分解する。
 // 書式は "# key=value" とする。
 // キーと値の前後にある空白は除去する。
@@ -1438,6 +1452,7 @@ try
 {
     // 古いデータによる誤再生を防止する。
     ReplayReady = false;
+    ResampledDataReady = false;
     RawDataReady = false;
 
     // 前回の読み込み結果を初期化する。
@@ -1765,65 +1780,473 @@ void read_raw_ReplayData()
 
 
 
-void resampleReplayData() {
-    int i = 0;
-    int i_resample = 0;
-    int current_time; //ms
-    int offset_time; //ms
+// rawDataからリサンプリング済みの
+// replayDataを生成する。
+// 実機再生の安全性検査は別の関数で行う。
+bool resampleReplayData()
+{
+    // 前回の処理結果と再生許可を無効化する。
+    ReplayReady = false;
+    ResampledDataReady = false;
+    replayData.clear();
 
-    if (!ReplayReady) { //replay data not loaded successfully
-        fprintf(stderr, "replay data not loaded successfully.abort resampling.\n");
-        return;
+    // CSV読み込みと形式検査が完了しているか確認する。
+    if (!RawDataReady || rawData.empty())
+    {
+        fprintf(stderr,
+            "Valid RAW data is not available.\n");
+
+        return false;
     }
 
-    // set first data as timeidx 0
-    offset_time = replay_timeidx_raw[0];
-    current_time = offset_time;
+    // リサンプリングの基本時間間隔 [ms]
+    const uint64_t interval_ms = INTV_RESAMPLE_REPLAY_MS;
 
-    replay_timeidx_resample[0] = 0;
-    memcpy(replay_position_resample[0], replay_position_raw[0], sizeof(hduVector3Dd));
+    // 元データの最終時刻 [ms]
+    const uint64_t endTime_ms = rawData.back().time_ms;
 
-    
-    for (i_resample = 1; i_resample < MAX_LEN_REPLAY_RESAMPLE;++i_resample) {
-        // set kijun time
-        current_time += INTV_RESAMPLE_REPLAY_MS;
-        //search next time idx which exceed kijun time
-        while (replay_timeidx_raw[i] < current_time) {
-            ++i;
-            if (i >= MAX_LEN_REPLAY_RAW) {
-                fprintf(stderr, "maximum raw replay data reached.\n");
-                return;
+    // 基本時間間隔で生成される区間数
+    const uint64_t intervals = endTime_ms / interval_ms;
+
+    // 点数計算時の整数オーバーフローと
+    // 過大なメモリ消費を防止する。
+    if (intervals >= MAX_RESAMPLED_SAMPLES)
+    {
+        fprintf(stderr,
+            "Resampling sample limit exceeded.\n");
+
+        return false;
+    }
+
+    // 開始時刻0msのサンプルを含めた点数
+    uint64_t sampleCount = intervals + 1;
+
+    // 最終時刻が基本時間間隔の整数倍でない場合、
+    // 元データの終点を追加する。
+    if (endTime_ms % interval_ms != 0)
+    {
+        ++sampleCount;
+    }
+
+    // 終点の追加後も生成点数の上限を検査する。
+    if (sampleCount > MAX_RESAMPLED_SAMPLES)
+    {
+        fprintf(stderr,
+            "Resampling sample limit exceeded.\n");
+
+        return false;
+    }
+
+    // リサンプリング対象となる時刻 [ms] の一覧。
+    // 基本サンプリング時刻に加えて、
+    // 音声・ボタンの変化時刻も格納する。
+    std::vector<uint64_t> targetTimes_ms;
+
+    // 基本生成点数に必要なメモリを事前に確保する。
+    // 音声・ボタンの変化時刻に対応する追加点は、
+    // 後続の処理で扱う。
+    try
+    {
+        targetTimes_ms.reserve(
+            static_cast<size_t>(sampleCount));
+
+        replayData.reserve(
+            static_cast<size_t>(sampleCount));
+    }
+    catch (const std::bad_alloc&)
+    {
+        fprintf(stderr,
+            "Memory allocation failed. "
+            "Resampling cancelled.\n");
+
+        return false;
+    }
+
+    // 基本サンプリング時刻 [ms] の一覧を生成する。
+    for (uint64_t i = 0; i < sampleCount; ++i)
+    {
+        if (i == sampleCount - 1)
+        {
+            targetTimes_ms.push_back(endTime_ms);
+        }
+        else
+        {
+            targetTimes_ms.push_back(i * interval_ms);
+        }
+    }
+
+    // 音声・ボタンの変化時刻 [ms] を追加する。
+    try
+    {
+        for (size_t i = 1; i < rawData.size(); ++i)
+        {
+            const MotionSample& prev = rawData[i - 1];
+            const MotionSample& curr = rawData[i];
+
+            // ボタン状態の変化を検出する。
+            const bool buttonsChanged =
+                curr.buttons != prev.buttons;
+
+            // 音声周波数の変化を検出する。
+            const bool freqChanged =
+                curr.audio_freq_hz != prev.audio_freq_hz;
+
+            // 音声振幅の変化を検出する。
+            const bool amplitudeChanged =
+                curr.audio_amplitude != prev.audio_amplitude;
+
+            // 音声に線形補間が指定されているか確認する。
+            const bool audioLinear =
+                rawMetadata.interpolation_audio_freq == "linear" ||
+                rawMetadata.interpolation_audio_amplitude == "linear";
+
+            // 線形補間の場合は、補間区間の境界を保存するため、
+            // 値の変化にかかわらずRAWデータの時刻を追加する。
+            if (buttonsChanged ||
+                freqChanged ||
+                amplitudeChanged ||
+                audioLinear)
+            {
+                // 基本サンプリング時刻と重複する場合は、
+                // 追加する必要がない。
+                if (curr.time_ms % interval_ms == 0 ||
+                    curr.time_ms == endTime_ms)
+                {
+                    continue;
+                }
+
+                // 追加時刻を含めた生成点数の上限検査。
+                // 過大なメモリ消費を防止する。
+                if (targetTimes_ms.size() >=
+                    MAX_RESAMPLED_SAMPLES)
+                {
+                    fprintf(stderr,
+                        "Resampling sample limit exceeded.\n");
+
+                    return false;
+                }
+
+                targetTimes_ms.push_back(curr.time_ms);
             }
         }
-        // set resampled array
-        replay_timeidx_resample[i_resample] = replay_timeidx_raw[i];
-        memcpy(replay_position_resample[i_resample], replay_position_raw[i], sizeof(hduVector3Dd));
-        // リサンプリングの各点の処理状況は、開発・検証用の詳細情報。
-      // 通常モードでは出力せず、Verboseモードでも表示しない.
-      //  if (VerboseMode) {
-       //     fprintf(stderr, "resample :index:%d  resampled time %d , raw time  %d.\n",
-       //         i_resample, replay_timeidx_resample[i_resample], replay_timeidx_raw[i]);
-       // }
-        
-        // store end of index for resample
-        end_idx_resample = i_resample + 1;
+    }
+    catch (const std::bad_alloc&)
+    {
+        fprintf(stderr,
+            "Memory allocation failed. "
+            "Resampling cancelled.\n");
 
-
+        return false;
     }
 
-    // リサンプリングの完了と生成データ数を利用者に通知する。
-// 処理結果の確認に必要なため、通常モードでも表示する。
-    if (strcmp(Language, "ja") == 0) {
-        fprintf(stderr, "リサンプリングが完了しました。%d点。\n",
-            end_idx_resample);
-    }
-    else {
-        fprintf(stderr, "Resampling completed. %d points.\n",
-            end_idx_resample);
+
+    // サンプリング時刻 [ms] を昇順に並べ替える。
+    std::sort(
+        targetTimes_ms.begin(),
+        targetTimes_ms.end());
+
+    // 重複するサンプリング時刻を削除する。
+    targetTimes_ms.erase(
+        std::unique(
+            targetTimes_ms.begin(),
+            targetTimes_ms.end()),
+        targetTimes_ms.end());
+
+    // 補間に使用するRAWデータの左側のインデックス。
+    size_t leftIndex = 0;
+
+
+    // 登録された各時刻について補間処理を行う。
+    for (const uint64_t targetTime_ms : targetTimes_ms)
+    {
+
+        // 目標時刻以下で最も新しいRAWデータを探索する。
+        // 配列の範囲外を参照しないようにする。
+        while (leftIndex + 1 < rawData.size() &&
+            rawData[leftIndex + 1].time_ms <= targetTime_ms)
+        {
+            ++leftIndex;
+        }
+
+        // 補間に使用する右側のインデックス。
+        size_t rightIndex = leftIndex;
+
+        // 次のRAWデータが存在する場合は、
+        // その点を補間の右側とする。
+        if (leftIndex + 1 < rawData.size())
+        {
+            rightIndex = leftIndex + 1;
+        }
+
+        // 補間に使用する左右のRAWデータを参照する。
+        const MotionSample& left = rawData[leftIndex];
+        const MotionSample& right = rawData[rightIndex];
+
+        // 線形補間係数（無次元）
+        double alpha = 0.0;
+
+        // 左右の時刻が異なる場合だけ補間係数を計算する。
+        // 最終点などでのゼロ除算を防止する。
+        if (right.time_ms > left.time_ms)
+        {
+            alpha =
+                static_cast<double>(
+                    targetTime_ms - left.time_ms)
+                /
+                static_cast<double>(
+                    right.time_ms - left.time_ms);
+        }
+
+        // リサンプリング後の1点分のデータを生成する。
+        MotionSample sample{};
+
+        // サンプリング時刻 [ms]
+        sample.time_ms = targetTime_ms;
+
+        // XYZ座標 [mm] を線形補間する。
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            sample.position[axis] =
+                (1.0 - alpha) * left.position[axis]
+                + alpha * right.position[axis];
+
+            // 補間結果が有限値であることを確認する。
+            if (!std::isfinite(sample.position[axis]))
+            {
+                replayData.clear();
+
+                fprintf(stderr,
+                    "Invalid interpolated position.\n");
+
+                return false;
+            }
+        }
+
+        // ボタン状態は直前のRAWデータの値を保持する。
+        // ボタン状態は離散値なので線形補間しない。
+        sample.buttons = left.buttons;
+
+        // 音声周波数 [Hz] の補間
+        if (rawMetadata.interpolation_audio_freq == "linear")
+        {
+            sample.audio_freq_hz =
+                (1.0 - alpha) * left.audio_freq_hz
+                + alpha * right.audio_freq_hz;
+        }
+        else
+        {
+            // 直前値保持
+            sample.audio_freq_hz = left.audio_freq_hz;
+        }
+
+        // 音声振幅（無次元、0.0～1.0）の補間
+        if (rawMetadata.interpolation_audio_amplitude == "linear")
+        {
+            sample.audio_amplitude =
+                (1.0 - alpha) * left.audio_amplitude
+                + alpha * right.audio_amplitude;
+        }
+        else
+        {
+            // 直前値保持
+            sample.audio_amplitude = left.audio_amplitude;
+        }
+
+        // 音声周波数 [Hz] の数値検査。
+        // 有限値かつ0以上であることを確認する。
+        if (!std::isfinite(sample.audio_freq_hz) ||
+            sample.audio_freq_hz < 0.0)
+        {
+            replayData.clear();
+
+            fprintf(stderr,
+                "Invalid interpolated audio frequency.\n");
+
+            return false;
+        }
+
+        // 音声振幅（無次元）の数値検査。
+        // 有限値かつ0.0～1.0であることを確認する。
+        if (!std::isfinite(sample.audio_amplitude) ||
+            sample.audio_amplitude < 0.0 ||
+            sample.audio_amplitude > 1.0)
+        {
+            replayData.clear();
+
+            fprintf(stderr,
+                "Invalid interpolated audio amplitude.\n");
+
+            return false;
+        }
+
+        // ジンバル角度 [rad] は暫定的に直前値を保持する。
+        // 角度の周期性を考慮した補間方式は今後検討する。
+        // 現在は実機の再生制御には使用しない。
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            sample.gimbalAngles[axis] =
+                left.gimbalAngles[axis];
+        }
+
+        // 生成点数が上限を超えないことを確認する。
+        if (replayData.size() >= MAX_RESAMPLED_SAMPLES)
+        {
+            replayData.clear();
+
+            fprintf(stderr,
+                "Resampling sample limit exceeded.\n");
+
+            return false;
+        }
+
+        // 生成したサンプルを末尾に追加する。
+        try
+        {
+            replayData.push_back(sample);
+        }
+        catch (const std::bad_alloc&)
+        {
+            // メモリ確保に失敗した場合は、
+            // 生成途中のデータをすべて破棄する。
+            replayData.clear();
+
+            fprintf(stderr,
+                "Memory allocation failed. "
+                "Resampling cancelled.\n");
+
+            return false;
+        }
     }
 
-    return;
+    // 追加時刻を含む目標時刻一覧の点数と、
+// 実際の生成点数が一致するか確認する。
+    if (replayData.size() != targetTimes_ms.size())
+    {
+        replayData.clear();
+
+        fprintf(stderr,
+            "Resampled sample count mismatch.\n");
+
+        return false;
+    }
+
+    // 開始時刻と終了時刻 [ms] を確認する。
+    if (replayData.empty() ||
+        replayData.front().time_ms != 0 ||
+        replayData.back().time_ms != endTime_ms)
+    {
+        replayData.clear();
+
+        fprintf(stderr,
+            "Invalid resampled start or end time.\n");
+
+        return false;
+    }
+
+    // 時刻が厳密に単調増加していることを確認する。
+    for (size_t i = 1; i < replayData.size(); ++i)
+    {
+        if (replayData[i].time_ms <=
+            replayData[i - 1].time_ms)
+        {
+            replayData.clear();
+
+            fprintf(stderr,
+                "Invalid resampled time sequence.\n");
+
+            return false;
+        }
+    }
+
+    // リサンプリングの正常完了を記録する。
+    ResampledDataReady = true;
+
+    // 安全性検査は未実施のため、
+    // 実機再生は許可しない。
+    ReplayReady = false;
+
+    // 生成結果を利用者に通知する。
+    if (strcmp(Language, "ja") == 0)
+    {
+        fprintf(stderr,
+            "リサンプリングが完了しました。%zu点。\n",
+            replayData.size());
+    }
+    else
+    {
+        fprintf(stderr,
+            "Resampling completed. %zu samples.\n",
+            replayData.size());
+    }
+
+    return true;
 }
+
+// Touchを使用せずにCSV読み込みと
+// リサンプリングを検証する。
+static bool testResampleCSV(const char* filename)
+{
+    // CSV読み込みと形式検査を行う。
+    const bool readResult = readMotionCSV(filename);
+
+    // CSV読み込みが成功した場合のみ、
+    // リサンプリングを実行する。
+    const bool result =
+        readResult && resampleReplayData();
+
+
+    // 処理結果と各状態フラグを表示する。
+    fprintf(stderr, "Result: %s\n",
+        result ? "PASS" : "FAIL");
+
+    fprintf(stderr, "RawDataReady: %s\n",
+        RawDataReady ? "true" : "false");
+
+    fprintf(stderr, "ResampledDataReady: %s\n",
+        ResampledDataReady ? "true" : "false");
+
+    fprintf(stderr, "ReplayReady: %s\n",
+        ReplayReady ? "true" : "false");
+
+    // 入力点数と生成点数を表示する。
+    fprintf(stderr, "RAW samples: %zu\n",
+        rawData.size());
+
+    fprintf(stderr, "Resampled samples: %zu\n",
+        replayData.size());
+
+    // 詳細表示モードでは生成された各サンプルを表示する。
+    // 大量出力を防ぐため、100点以下の場合に限定する。
+    if (result && VerboseMode &&
+        replayData.size() <= 100)
+    {
+        fprintf(stderr,
+            "time_ms,x_mm,y_mm,z_mm,"
+            "gimbal1_rad,gimbal2_rad,gimbal3_rad,"
+            "buttons,audio_freq_hz,audio_amplitude\n");
+
+        for (const MotionSample& sample : replayData)
+        {
+            fprintf(stderr,
+                "%llu,%.6f,%.6f,%.6f,"
+                "%.6f,%.6f,%.6f,%u,%.6f,%.6f\n",
+                static_cast<unsigned long long>(
+                    sample.time_ms),
+                sample.position[0],
+                sample.position[1],
+                sample.position[2],
+                sample.gimbalAngles[0],
+                sample.gimbalAngles[1],
+                sample.gimbalAngles[2],
+                static_cast<unsigned int>(sample.buttons),
+                sample.audio_freq_hz,
+                sample.audio_amplitude);
+        }
+    }
+
+    return result;
+}
+
 
 void writeResampledReplayData() {
     int t;
@@ -1874,6 +2297,9 @@ int main(int argc, char* argv[])
     // CSV読み込み単体試験モード
     bool testCSV = false;
 
+    // Touchを使用しないリサンプリング検証モード。
+    bool testResample = false;
+
 for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
         replayFilename = argv[++i];
@@ -1895,6 +2321,12 @@ for (int i = 1; i < argc; ++i) {
     else if (strcmp(argv[i], "--test-csv") == 0) {
         testCSV = true;
     }
+
+    else if (strcmp(argv[i], "--test-resample") == 0)
+    {
+        testResample = true;
+    }
+
 }
 
 // 言語設定は開発時の確認情報なので、Verboseモードでのみ表示する。
@@ -1917,6 +2349,19 @@ if (testCSV)
 
     return RawDataReady ? 0 : 1;
 }
+
+// Touchの初期化を行わずに、
+// CSV読み込みとリサンプリングを検証する。
+if (testResample)
+{
+    const char* filename =
+        replayFilename != NULL
+        ? replayFilename
+        : FNAME_REC;
+
+    return testResampleCSV(filename) ? 0 : 1;
+}
+
 
 HDErrorInfo error;
 

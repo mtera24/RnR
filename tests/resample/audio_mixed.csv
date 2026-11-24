@@ -1,0 +1,8 @@
+# format=RnR
+# version=1.0
+# interpolation_audio_freq=linear
+# interpolation_audio_amplitude=hold
+time_ms,x_mm,y_mm,z_mm,audio_freq_hz,audio_amplitude
+0,0,0,0,440,0.1
+15,15,0,0,740,0.4
+30,30,0,0,440,0.2
