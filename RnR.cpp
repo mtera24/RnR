@@ -1007,8 +1007,6 @@ void resampleReplayData() {
     }
 
     return;
-
-    return;
 }
 
 void writeResampledReplayData() {
