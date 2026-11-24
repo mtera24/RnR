@@ -31,6 +31,9 @@ Description:
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <vector>
+#include <cstdint>
+#include <new>
 
 #if defined(WIN32)
 # include <windows.h>
@@ -50,6 +53,29 @@ Description:
 #include <HDU/hduError.h>
 #include <HDU/hduVector.h>
 
+// 運動・姿勢・操作状態・音出力情報を
+// 共通の時刻で管理するための1サンプル分のデータ構造
+struct MotionSample
+{
+    uint64_t time_ms = 0;
+    double position[3] = {};
+    double gimbalAngles[3] = {};
+    uint32_t buttons = 0;
+    double audio_freq_hz = 0.0;
+    double audio_amplitude = 0.0;
+};
+
+// Recordによって取得した実測データ
+static std::vector<MotionSample> recordedData;
+
+// CSVから読み込んだ未加工の運動データ
+static std::vector<MotionSample> rawData;
+
+// 安全性検査および必要なリサンプリングを経て
+// Replayに使用する運動データ
+static std::vector<MotionSample> replayData;
+
+
 static bool ReplayMode = false;
 static bool ReplayReady = false; // whether replay data loaded or not.
 
@@ -57,7 +83,10 @@ static const char* Language = "en";
 static bool VerboseMode = false;
 
 /* # of record */
-#define LEN_REC 10000
+
+// 記録点数の暫定上限（メモリ使用量の制限）
+static constexpr size_t MAX_RECORD_SAMPLES = 10000;
+
 /* interval for recording [ms]*/
 #define INTV_REC 10 
 // filename for record
@@ -80,12 +109,7 @@ static bool VerboseMode = false;
 
 
 static int end_idx_resample;
-static int end_idx_record;
 
-
-static hduVector3Dd rec_position[LEN_REC];
-static hduVector3Dd rec_gimbalAngles[LEN_REC];
-static DWORD rec_timeidx[LEN_REC];
 static DWORD time_start;
 
 static hduVector3Dd replay_position_raw[MAX_LEN_REPLAY_RAW];
@@ -455,6 +479,32 @@ void PrintDeviceState(HDboolean bContinuous)
 *****************************************************************************/
 void RecordDeviceState()
 {
+
+    // 前回の記録データを消去する
+    recordedData.clear();
+
+    // 記録開始前に必要なメモリを確保する。
+    // 確保に失敗した場合は記録を開始しない。
+    try
+    {
+        recordedData.reserve(MAX_RECORD_SAMPLES);
+    }
+    catch (const std::bad_alloc&)
+    {
+        if (strcmp(Language, "ja") == 0)
+        {
+            fprintf(stderr,
+                "メモリ確保に失敗しました。記録を中止します。\n");
+        }
+        else
+        {
+            fprintf(stderr,
+                "Memory allocation failed. Recording cancelled.\n");
+        }
+
+        return;
+    }
+
     // ボタン1が一度離されたかを記録する。
     // 開始時に押していたボタンで、すぐ記録終了しないようにする。
     bool button1Released = false;
@@ -466,12 +516,13 @@ void RecordDeviceState()
     DeviceStateStruct buttonState = {};
 
     /* # of record */
-    // #define LEN_REC 10000
     /* interval for recording [ms]*/
     // #define INTV_REC 10
-    float lim_rec_time = LEN_REC * INTV_REC * 0.001;
+   // 記録可能時間の算出
+    double lim_rec_time =
+        MAX_RECORD_SAMPLES * INTV_REC / 1000.0;
+
     int i;
-    int t;
     double end_time;
     DWORD now, time_next;
 
@@ -480,9 +531,7 @@ void RecordDeviceState()
     DeviceStateStruct state;
 
     memset(&state, 0, sizeof(DeviceStateStruct));
-    //end_idx_record = end_idx_resample;
-    //end_time = end_idx_record * INTV_REC / 1000.0; //sec
-
+    
     // Record開始前の案内
 // --lang ja の場合は日本語、それ以外は英語で表示する。
     if (strcmp(Language, "ja") == 0) {
@@ -517,13 +566,31 @@ void RecordDeviceState()
     hdScheduleSynchronous(GetDeviceStateCallback, &state,
         HD_DEFAULT_SCHEDULER_PRIORITY);
 
-    memcpy(rec_position[0], state.position, sizeof(hduVector3Dd));
-    memcpy(rec_gimbalAngles[0], state.gimbalAngles, sizeof(hduVector3Dd));
-    rec_timeidx[0] = now;
     time_next = now;
 
-    //for(t=1;t< lim_rec_time;++t)
-    t = 1;
+    // 記録開始時点の運動・操作状態を格納する
+    MotionSample sample;
+
+    sample.time_ms = 0;
+
+    memcpy(sample.position, state.position,
+        sizeof(sample.position));
+
+    memcpy(sample.gimbalAngles, state.gimbalAngles,
+        sizeof(sample.gimbalAngles));
+
+    sample.buttons = static_cast<uint32_t>(state.buttons);
+
+    // ボタン2の状態から音出力指示を生成する
+    if ((state.buttons & HD_DEVICE_BUTTON_2) != 0)
+    {
+        sample.audio_freq_hz = 440.0;
+        sample.audio_amplitude = 3000.0 / 32767.0;
+    }
+
+    // 最初のサンプルを動的配列に追加する
+    recordedData.push_back(sample);
+
     do
     {
         time_next += INTV_REC;
@@ -533,10 +600,28 @@ void RecordDeviceState()
         hdScheduleSynchronous(GetDeviceStateCallback, &state,
             HD_DEFAULT_SCHEDULER_PRIORITY);
 
-        memcpy(rec_position[t], state.position, sizeof(hduVector3Dd));
-        memcpy(rec_gimbalAngles[t], state.gimbalAngles, sizeof(hduVector3Dd));
-        rec_timeidx[t] = now;
-        ++t;
+        // 運動・操作状態・音出力情報を同一サンプルとして管理する
+        MotionSample sample;
+
+        // 記録開始からの相対時刻 [ms]
+        sample.time_ms = static_cast<uint64_t>(now - time_start);
+
+        memcpy(sample.position, state.position,
+            sizeof(sample.position));
+
+        memcpy(sample.gimbalAngles, state.gimbalAngles,
+            sizeof(sample.gimbalAngles));
+
+        sample.buttons = static_cast<uint32_t>(state.buttons);
+
+        // ボタン2の状態に対応する音出力指示を保存する
+        if ((state.buttons & HD_DEVICE_BUTTON_2) != 0)
+        {
+            sample.audio_freq_hz = 440.0;
+            sample.audio_amplitude = 3000.0 / 32767.0;
+        }
+
+        recordedData.push_back(sample);
 
         // Touchの現在のボタン状態を取得する
         hdScheduleSynchronous(
@@ -585,90 +670,76 @@ void RecordDeviceState()
             break;
         }
 
-    } while (!_kbhit() && t < LEN_REC);
+        // キー入力または記録点数の上限到達で記録を終了する
+    } while (!_kbhit() &&
+        recordedData.size() < MAX_RECORD_SAMPLES);
 
     // Record終了時は、ボタン2の状態にかかわらず音声を停止する
     StopAudio();
 
-    end_idx_record = t;
+    fprintf(stderr, "record end.\n");
 
-
-//#if defined(WIN32)
-//            Sleep(INTV_REC);
-//#elif defined(linux)
-//            struct timespec timeOut;
-//            timeOut.tv_sec = 0;
-//            timeOut.tv_nsec = 1 * 100000000;
-//            nanosleep(&timeOut, NULL);
-//#endif
- 
-
-    fprintf(stderr,"record end.\n");
-    /* get time difference */
-    for (t = 0; t < end_idx_record; ++t) {
-        rec_timeidx[t] -= time_start;
-    }
-    
-    //for (t = 0; t < end_idx_record; ++t) {
-    //    int i;
-    //    printf("time:%d: ", rec_timeidx[t]);
-    //    printf("Current position (mm):");
-    //    for (i = 0; i < 3; i++)
-    //    {
-    //        printf(" %f", rec_position[t][i]);
-    //    }
-    //    //printf("\n");
-
-    //    printf("Current Gimbal Angles (rad):");
-    //    for (i = 0; i < 3; i++)
-    //    {
-    //        printf(" %f", rec_gimbalAngles[t][i]);
-    //    }
-    //    printf("\n");
-
-    //}
     // write to file
     fp_rec_csv = fopen(FNAME_REC, "w");
-    if (fp_rec_csv==NULL) {
-        fprintf(stderr, "file open failed! : %s \n",FNAME_REC);
+
+    if (fp_rec_csv == NULL) {
+        fprintf(stderr, "file open failed! : %s\n", FNAME_REC);
         exit(1);
     }
     else {
-        fprintf(fp_rec_csv, "# time[ms], position x, y, z [mm], gimbal_angle [rad] \n");
-        for (t = 0; t < end_idx_record; ++t) {
-            int i;
-            fprintf(fp_rec_csv, "%d, ", rec_timeidx[t]);
-            for (i = 0; i < 3; i++)
-            {
-                fprintf(fp_rec_csv, "%f, ", rec_position[t][i]);
-            }
-            for (i = 0; i < 3; i++)
-            {
-                fprintf(fp_rec_csv, "%f", rec_gimbalAngles[t][i]);
-                if (i < 2) {
-                    fprintf(fp_rec_csv, ", ");
-                }
-                
-            }
-            fprintf(fp_rec_csv, "\n");
+        // RnR CSV形式の識別情報
+        fprintf(fp_rec_csv, "# format=RnR\n");
+        fprintf(fp_rec_csv, "# version=1.0\n");
+        fprintf(fp_rec_csv, "# source=recorded\n");
 
+        // CSV列名（物理量の単位を含む）
+        fprintf(fp_rec_csv,
+            "time_ms,x_mm,y_mm,z_mm,"
+            "gimbal1_rad,gimbal2_rad,gimbal3_rad,"
+            "buttons,audio_freq_hz,audio_amplitude\n");
+
+        // 動的配列に格納された全サンプルを保存する
+        for (const MotionSample& s : recordedData)
+        {
+            fprintf(fp_rec_csv,
+                "%llu,%.17g,%.17g,%.17g,"
+                "%.17g,%.17g,%.17g,"
+                "%u,%.17g,%.17g\n",
+                static_cast<unsigned long long>(s.time_ms),
+                s.position[0],
+                s.position[1],
+                s.position[2],
+                s.gimbalAngles[0],
+                s.gimbalAngles[1],
+                s.gimbalAngles[2],
+                static_cast<unsigned int>(s.buttons),
+                s.audio_freq_hz,
+                s.audio_amplitude);
         }
-        fclose(fp_rec_csv);
-    }
-    // Record終了後は、NVDAが読み上げやすいように
-    // 詳細な数値ではなく、記録結果の要約だけを表示する。
-    double recordedSeconds =
-        rec_timeidx[end_idx_record - 1] / 1000.0;
 
+        fclose(fp_rec_csv);
+
+    }
+
+    // 記録開始から最終サンプルまでの経過時間 [秒]
+    // 空のvectorに対するback()の呼び出しを防止する
+    double recordedSeconds = 0.0;
+
+    if (!recordedData.empty())
+    {
+        recordedSeconds = recordedData.back().time_ms / 1000.0;
+    }
+
+    // NVDAが読み上げやすいように記録結果の要約を表示する
     if (strcmp(Language, "ja") == 0) {
         fprintf(stderr,
-            "記録終了。記録時間 %.1f 秒、記録点数 %d 点。%s に保存しました。\n",
-            recordedSeconds, end_idx_record, FNAME_REC);
+            "記録終了。記録時間 %.1f 秒、記録点数 %zu 点。%s に保存しました。\n",
+            recordedSeconds, recordedData.size(), FNAME_REC);
     }
     else {
         fprintf(stderr,
-            "Recording finished. Duration %.1f seconds, %d samples. Saved to %s.\n",
-            recordedSeconds, end_idx_record, FNAME_REC);
+            "Recording finished. Duration %.1f seconds, %zu samples. Saved to %s.\n",
+            recordedSeconds, recordedData.size(), FNAME_REC);
     }
 }
 
@@ -1030,12 +1101,6 @@ void writeResampledReplayData() {
                    fprintf(fp_replay_resample, ", ");
 
             }
- //           for (i = 0; i < 3; i++)
- //           {
- //               fprintf(fp_rec_csv, "%f", rec_gimbalAngles[t][i]);
- //               if (i < 2) {
- //                   fprintf(fp_rec_csv, ", ");
- //               }
 
             }
             fprintf(fp_replay_resample, "\n");
