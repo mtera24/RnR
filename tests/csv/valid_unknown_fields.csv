@@ -1,0 +1,6 @@
+# format=RnR
+# version=1.0
+# future_metadata=test
+time_ms,x_mm,future_column,y_mm,z_mm
+0,10,abc,20,30
+10,11,def,21,31

@@ -1707,6 +1707,61 @@ static void testReadMotionCSV(
         fprintf(stderr, "Last time: %llu ms\n",
             static_cast<unsigned long long>(
                 rawData.back().time_ms));
+
+        // 詳細表示モードでは、最初のサンプルの
+        // 各メンバが正しく読み込まれたか確認する。
+        if (VerboseMode)
+        {
+            const MotionSample& s = rawData.front();
+
+            fprintf(stderr, "\n--- First Sample ---\n");
+
+            // 位置 [mm]
+            fprintf(stderr, "X: %.17g\n", s.position[0]);
+            fprintf(stderr, "Y: %.17g\n", s.position[1]);
+            fprintf(stderr, "Z: %.17g\n", s.position[2]);
+
+            // ジンバル角度 [rad]
+            fprintf(stderr, "Gimbal1: %.17g\n",
+                s.gimbalAngles[0]);
+            fprintf(stderr, "Gimbal2: %.17g\n",
+                s.gimbalAngles[1]);
+            fprintf(stderr, "Gimbal3: %.17g\n",
+                s.gimbalAngles[2]);
+
+            // ボタン状態（ビットマスク）
+            fprintf(stderr, "Buttons: %u\n",
+                static_cast<unsigned int>(s.buttons));
+
+            // 音の周波数 [Hz] と正規化振幅
+            fprintf(stderr, "Audio frequency: %.17g Hz\n",
+                s.audio_freq_hz);
+            fprintf(stderr, "Audio amplitude: %.17g\n",
+                s.audio_amplitude);
+
+            // 任意列の存在有無を表示する。
+            // 列番号が-1の場合、その列は存在しない。
+            fprintf(stderr, "\n--- Optional Columns ---\n");
+
+            fprintf(stderr, "Gimbal1: %s\n",
+                rawColumns.gimbal1_rad >= 0 ? "present" : "absent");
+
+            fprintf(stderr, "Gimbal2: %s\n",
+                rawColumns.gimbal2_rad >= 0 ? "present" : "absent");
+
+            fprintf(stderr, "Gimbal3: %s\n",
+                rawColumns.gimbal3_rad >= 0 ? "present" : "absent");
+
+            fprintf(stderr, "Buttons: %s\n",
+                rawColumns.buttons >= 0 ? "present" : "absent");
+
+            fprintf(stderr, "Audio frequency: %s\n",
+                rawColumns.audio_freq_hz >= 0 ? "present" : "absent");
+
+            fprintf(stderr, "Audio amplitude: %s\n",
+                rawColumns.audio_amplitude >= 0 ? "present" : "absent");
+
+        }
     }
 
     fprintf(stderr, "--- End of Test ---\n");

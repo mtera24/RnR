@@ -1,0 +1,5 @@
+# format=RnR
+# version=1.0
+z_mm,audio_amplitude,x_mm,buttons,time_ms,y_mm,audio_freq_hz,gimbal3_rad,gimbal1_rad,gimbal2_rad
+30,0.1,10,2,0,20,440,0.3,0.1,0.2
+31,0.2,11,0,10,21,880,0.4,0.2,0.3
