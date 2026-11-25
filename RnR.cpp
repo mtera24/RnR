@@ -2616,6 +2616,70 @@ static bool equalMotionCSVColumns(
         (a.audio_amplitude >= 0) == (b.audio_amplitude >= 0);
 }
 
+// 試験用：ファイルの全内容をバイト列として取得する。
+static bool readFileBytes(
+    const char* filename,
+    std::string& content)
+{
+    std::ifstream file(
+        filename, std::ios::binary);
+
+    if (!file)
+    {
+        return false;
+    }
+
+    content.clear();
+
+    char c;
+
+    while (file.get(c))
+    {
+        content.push_back(c);
+    }
+
+    return file.eof() && !file.bad();
+}
+
+// 異常データの拒否と既存ファイルの保全を検査する。
+static bool testRejectedWrite(
+    const char* filename,
+    const std::vector<MotionSample>& data,
+    const MotionCSVMetadata& metadata,
+    const MotionCSVColumns& columns)
+{
+    // 書き出し前のファイル内容
+    std::string before;
+
+    if (!readFileBytes(filename, before))
+    {
+        fprintf(stderr, "Cannot read original file.\n");
+        return false;
+    }
+
+    // 異常データの書き出しを試みる。
+    const bool rejected = !writeMotionCSV(
+        filename, data, metadata, columns);
+
+    // 書き出し後のファイル内容
+    std::string after;
+
+    if (!readFileBytes(filename, after))
+    {
+        fprintf(stderr, "Cannot read file after test.\n");
+        return false;
+    }
+
+    // ファイル内容が変化していないことを確認する。
+    const bool unchanged = (before == after);
+
+    if (!unchanged)
+    {
+        fprintf(stderr, "File content changed.\n");
+    }
+
+    return rejected && unchanged;
+}
 
 // Touchを使用せずにCSV書き出し処理を検証する。
 // 入力ファイルは指定する。
@@ -2729,7 +2793,266 @@ catch (const std::bad_alloc&)
     return false;
 }
 
+// CSV書き出し関数の単体試験。
+// CSV読み込みおよびTouchの初期化は行わない。
+static bool testWriteMotionCSVUnit()
+{
+    // 正常なメタデータを生成する。
+    MotionCSVMetadata metadata;
+    metadata.format = "RnR";
+    metadata.version = "1.0";
+    metadata.source = "generated";
+    metadata.nominal_interval_ms = "10";
 
+    // 必須列のみを使用する。
+    MotionCSVColumns columns;
+    columns.time_ms = 0;
+    columns.x_mm = 1;
+    columns.y_mm = 2;
+    columns.z_mm = 3;
+
+    // 正常な運動データを3点生成する。
+    std::vector<MotionSample> data(3);
+
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        // 時刻 [ms]
+        data[i].time_ms = i * 10;
+
+        // 位置 [mm]
+        data[i].position[0] =
+            static_cast<double>(i);
+    }
+
+    // 試験専用の一時ファイルを確保する。
+    char filename[MAX_PATH] = {};
+
+    if (!createCSVTestFile(filename))
+    {
+        return false;
+    }
+
+    // W01：正常データの書き出し
+    bool result = writeMotionCSV(
+        filename, data, metadata, columns);
+
+    fprintf(stderr, "W01: %s\n",
+        result ? "PASS" : "FAIL");
+
+    // 異常系試験用のメタデータ
+    MotionCSVMetadata invalidMetadata;
+
+    // W02：不正なフォーマット名
+    invalidMetadata = metadata;
+    invalidMetadata.format = "Invalid";
+
+    bool passed = testRejectedWrite(
+        filename, data, invalidMetadata, columns);
+
+    fprintf(stderr, "W02: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W03：未対応のバージョン
+    invalidMetadata = metadata;
+    invalidMetadata.version = "2.0";
+
+    passed = testRejectedWrite(
+        filename, data, invalidMetadata, columns);
+
+    fprintf(stderr, "W03: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W04：不正な公称サンプリング間隔 [ms]
+    invalidMetadata = metadata;
+    invalidMetadata.nominal_interval_ms = "0";
+
+    passed = testRejectedWrite(
+        filename, data, invalidMetadata, columns);
+
+    fprintf(stderr, "W04: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W05：未対応の補間方式
+    invalidMetadata = metadata;
+    invalidMetadata.interpolation_audio_freq = "cubic";
+
+    passed = testRejectedWrite(
+        filename, data, invalidMetadata, columns);
+
+    fprintf(stderr, "W05: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // 異常系試験用の運動データ
+    std::vector<MotionSample> invalidData;
+
+    // W06：運動データが空
+    invalidData.clear();
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W06: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W07：開始時刻が0 msではない
+    invalidData = data;
+    invalidData[0].time_ms = 1;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W07: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W08：時刻の重複
+    invalidData = data;
+    invalidData[1].time_ms = 0;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W08: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W09：時刻の逆転
+    invalidData = data;
+    invalidData[2].time_ms = 5;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W09: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W10：位置 [mm] がNaN
+    invalidData = data;
+    invalidData[1].position[0] =
+        std::numeric_limits<double>::quiet_NaN();
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W10: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W11：位置 [mm] が無限大
+    invalidData = data;
+    invalidData[1].position[0] =
+        std::numeric_limits<double>::infinity();
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W11: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W12：ジンバル角度 [rad] が無限大
+    invalidData = data;
+    invalidData[1].gimbalAngles[0] =
+        std::numeric_limits<double>::infinity();
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W12: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W13：不正なボタン状態
+    invalidData = data;
+    invalidData[1].buttons = 4;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W13: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W14：音声周波数 [Hz] が負
+    invalidData = data;
+    invalidData[1].audio_freq_hz = -1.0;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W14: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W15：音声振幅が負
+    invalidData = data;
+    invalidData[1].audio_amplitude = -0.1;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W15: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W16：音声振幅が上限を超える
+    invalidData = data;
+    invalidData[1].audio_amplitude = 1.1;
+
+    passed = testRejectedWrite(
+        filename, invalidData, metadata, columns);
+
+    fprintf(stderr, "W16: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W17：出力ファイルを開けない場合
+// Windowsのファイル名に使用できない文字を指定する。
+    passed = !writeMotionCSV(
+        "invalid<filename>.csv",
+        data, metadata, columns);
+
+    fprintf(stderr, "W17: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+
+
+    // 成功時は一時ファイルを削除する。
+    if (result && !VerboseMode)
+    {
+        DeleteFileA(filename);
+    }
+    else
+    {
+        fprintf(stderr, "Output file: %s\n",
+            filename);
+    }
+
+    return result;
+}
 
 void writeResampledReplayData() {
     int t;
@@ -2786,6 +3109,9 @@ int main(int argc, char* argv[])
     // Touchを使用しないCSV書き出し試験モード。
     bool testWriteCSV = false;
 
+    // CSV書き出し関数の単体試験モード
+    bool testWriteCSVUnit = false;
+
 for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
         replayFilename = argv[++i];
@@ -2816,6 +3142,10 @@ for (int i = 1; i < argc; ++i) {
     else if (strcmp(argv[i], "--test-write-csv") == 0)
     {
         testWriteCSV = true;
+    }
+    else if (strcmp(argv[i], "--test-write-csv-unit") == 0)
+    {
+        testWriteCSVUnit = true;
     }
 
 }
@@ -2862,6 +3192,12 @@ if (testWriteCSV)
         : FNAME_REC;
 
     return testWriteMotionCSV(filename) ? 0 : 1;
+}
+
+// Touchを初期化せずにCSV書き出し関数を単体試験する。
+if (testWriteCSVUnit)
+{
+    return testWriteMotionCSVUnit() ? 0 : 1;
 }
 
 HDErrorInfo error;
