@@ -48,6 +48,10 @@ Description:
 
 #include <algorithm>
 
+#include <iomanip>
+#include <limits>
+#include <locale>
+
 #if defined(WIN32)
 # include <windows.h>
 # include <conio.h>
@@ -1290,6 +1294,54 @@ static bool parseCSVHeader(
     return true;
 }
 
+// 1サンプル分の運動データがCSV仕様に
+// 適合しているか検査する。
+// 時刻の検査および実機再生の安全性検査は別途行う。
+static bool validateMotionSample(
+    const MotionSample& sample)
+{
+    // XYZ座標 [mm] の有限値検査
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (!std::isfinite(sample.position[axis]))
+        {
+            return false;
+        }
+    }
+
+    // ジンバル角度 [rad] の有限値検査
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        if (!std::isfinite(sample.gimbalAngles[axis]))
+        {
+            return false;
+        }
+    }
+
+    // ボタン状態（ビットマスク）
+    if (sample.buttons > 3)
+    {
+        return false;
+    }
+
+    // 音声周波数 [Hz]
+    if (!std::isfinite(sample.audio_freq_hz) ||
+        sample.audio_freq_hz < 0.0)
+    {
+        return false;
+    }
+
+    // 音声振幅（無次元、0.0～1.0）
+    if (!std::isfinite(sample.audio_amplitude) ||
+        sample.audio_amplitude < 0.0 ||
+        sample.audio_amplitude > 1.0)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 // CSVのデータ行から運動データを生成する。
 // 必須項目の欠落や不正な数値を拒否する。
 // fieldsにはヘッダと同じ列数が必要である。
@@ -1402,10 +1454,6 @@ static bool parseCSVSample(
             return false;
         }
 
-        if (sample.audio_freq_hz < 0.0)
-        {
-            return false;
-        }
     }
 
     // 音の振幅（0.0～1.0の正規化値）
@@ -1418,30 +1466,28 @@ static bool parseCSVSample(
             return false;
         }
 
-        if (sample.audio_amplitude < 0.0 ||
-            sample.audio_amplitude > 1.0)
-        {
-            return false;
-        }
     }
 
-    return true;
+    // 数値変換後のサンプルを共通検査関数で検査する。
+    return validateMotionSample(sample);
 }
 
 // 新しいサンプルの時刻がCSV仕様に適合するか検査する。
 // 最初の時刻は0msとし、以降は厳密な単調増加を要求する。
+// サンプルの時刻 [ms] がCSV仕様に適合するか検査する。
+// previousがnullptrの場合は先頭サンプルとして扱う。
 static bool validateCSVSampleTime(
-    const std::vector<MotionSample>& data,
+    const MotionSample* previous,
     const MotionSample& sample)
 {
     // 最初のサンプルは時刻0msでなければならない。
-    if (data.empty())
+    if (previous == nullptr)
     {
         return sample.time_ms == 0;
     }
 
     // 直前のサンプルより時刻が進んでいることを確認する。
-    return sample.time_ms > data.back().time_ms;
+    return sample.time_ms > previous->time_ms;
 }
 
 // RnR CSV Version 1.0形式のファイルを読み込む。
@@ -1580,7 +1626,9 @@ try
         }
 
         // 時刻の単調増加を検査する。
-        if (!validateCSVSampleTime(rawData, sample))
+        if (!validateCSVSampleTime(
+            rawData.empty() ? nullptr : &rawData.back(),
+            sample))
         {
             fprintf(stderr,
                 "Invalid timestamp at line %zu.\n",
@@ -1667,6 +1715,52 @@ catch (const std::bad_alloc&)
     }
 
     return false;
+}
+
+// 運動データ全体がCSV仕様に適合するか検査する。
+// 実機再生の安全性検査は含まない。
+static bool validateMotionData(
+    const std::vector<MotionSample>& data)
+{
+    // 空のデータは許容しない。
+    if (data.empty())
+    {
+        fprintf(stderr,
+            "No motion data.\n");
+
+        return false;
+    }
+
+    const MotionSample* previous = nullptr;
+
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        const MotionSample& sample = data[i];
+
+        // 時刻 [ms] の検査
+        if (!validateCSVSampleTime(previous, sample))
+        {
+            fprintf(stderr,
+                "Invalid timestamp at sample %zu.\n",
+                i + 1);
+
+            return false;
+        }
+
+        // サンプル内の数値検査
+        if (!validateMotionSample(sample))
+        {
+            fprintf(stderr,
+                "Invalid motion data at sample %zu.\n",
+                i + 1);
+
+            return false;
+        }
+
+        previous = &sample;
+    }
+
+    return true;
 }
 
 // 指定されたCSVファイルの読み込みを検証する。
@@ -2010,16 +2104,6 @@ bool resampleReplayData()
                 (1.0 - alpha) * left.position[axis]
                 + alpha * right.position[axis];
 
-            // 補間結果が有限値であることを確認する。
-            if (!std::isfinite(sample.position[axis]))
-            {
-                replayData.clear();
-
-                fprintf(stderr,
-                    "Invalid interpolated position.\n");
-
-                return false;
-            }
         }
 
         // ボタン状態は直前のRAWデータの値を保持する。
@@ -2052,32 +2136,6 @@ bool resampleReplayData()
             sample.audio_amplitude = left.audio_amplitude;
         }
 
-        // 音声周波数 [Hz] の数値検査。
-        // 有限値かつ0以上であることを確認する。
-        if (!std::isfinite(sample.audio_freq_hz) ||
-            sample.audio_freq_hz < 0.0)
-        {
-            replayData.clear();
-
-            fprintf(stderr,
-                "Invalid interpolated audio frequency.\n");
-
-            return false;
-        }
-
-        // 音声振幅（無次元）の数値検査。
-        // 有限値かつ0.0～1.0であることを確認する。
-        if (!std::isfinite(sample.audio_amplitude) ||
-            sample.audio_amplitude < 0.0 ||
-            sample.audio_amplitude > 1.0)
-        {
-            replayData.clear();
-
-            fprintf(stderr,
-                "Invalid interpolated audio amplitude.\n");
-
-            return false;
-        }
 
         // ジンバル角度 [rad] は暫定的に直前値を保持する。
         // 角度の周期性を考慮した補間方式は今後検討する。
@@ -2086,6 +2144,17 @@ bool resampleReplayData()
         {
             sample.gimbalAngles[axis] =
                 left.gimbalAngles[axis];
+        }
+
+        // 生成されたサンプルがCSV仕様に適合するか検査する。
+        if (!validateMotionSample(sample))
+        {
+            replayData.clear();
+
+            fprintf(stderr,
+                "Invalid resampled motion sample.\n");
+
+            return false;
         }
 
         // 生成点数が上限を超えないことを確認する。
@@ -2130,33 +2199,26 @@ bool resampleReplayData()
         return false;
     }
 
-    // 開始時刻と終了時刻 [ms] を確認する。
+    // RAWデータと終了時刻 [ms] が一致することを確認する。
     if (replayData.empty() ||
-        replayData.front().time_ms != 0 ||
         replayData.back().time_ms != endTime_ms)
     {
         replayData.clear();
 
         fprintf(stderr,
-            "Invalid resampled start or end time.\n");
+            "Invalid resampled end time.\n");
 
         return false;
     }
 
-    // 時刻が厳密に単調増加していることを確認する。
-    for (size_t i = 1; i < replayData.size(); ++i)
+    // 生成された運動データ全体の妥当性を検査する。
+    if (!validateMotionData(replayData))
     {
-        if (replayData[i].time_ms <=
-            replayData[i - 1].time_ms)
-        {
-            replayData.clear();
+        replayData.clear();
 
-            fprintf(stderr,
-                "Invalid resampled time sequence.\n");
-
-            return false;
-        }
+        return false;
     }
+
 
     // リサンプリングの正常完了を記録する。
     ResampledDataReady = true;
@@ -2247,6 +2309,427 @@ static bool testResampleCSV(const char* filename)
     return result;
 }
 
+// RnR CSV Version 1.0形式で運動データを書き出す。
+// 正常終了時はtrue、失敗時はfalseを返す。
+// 実機再生の許可状態は変更しない。
+static bool writeMotionCSV(
+    const char* filename,
+    const std::vector<MotionSample>& data,
+    const MotionCSVMetadata& metadata,
+    const MotionCSVColumns& columns)
+{
+
+
+    // メタデータがCSV Version 1.0の仕様に
+    // 適合しているか検査する。
+    if (!validateCSVMetadata(metadata))
+    {
+        fprintf(stderr,
+            "Invalid CSV metadata.\n");
+
+        return false;
+    }
+
+    // 運動データ全体がCSV仕様に適合するか検査する。
+    if (!validateMotionData(data))
+    {
+        return false;
+    }
+
+    // CSV出力先ファイルを開く。
+    std::ofstream file(filename);
+
+
+    // ファイルを開けなかった場合は処理を中止する。
+    if (!file.is_open())
+    {
+        fprintf(stderr,
+            "Cannot open output file: %s\n",
+            filename);
+
+        return false;
+    }
+
+    // 地域設定に依存しない数値出力形式を使用する。
+    // 小数点をピリオドに固定し、桁区切りを使用しない。
+    file.imbue(std::locale::classic());
+
+    // 必須メタデータを出力する。
+    file << "# format=" << metadata.format << "\n";
+    file << "# version=" << metadata.version << "\n";
+
+    // 省略可能なメタデータは、
+    // 値が指定されている場合だけ出力する。
+    if (!metadata.title.empty())
+        file << "# title=" << metadata.title << "\n";
+
+    if (!metadata.device.empty())
+        file << "# device=" << metadata.device << "\n";
+
+    if (!metadata.source.empty())
+        file << "# source=" << metadata.source << "\n";
+
+    if (!metadata.created_at.empty())
+        file << "# created_at=" << metadata.created_at << "\n";
+
+    // 公称サンプリング間隔 [ms]
+    if (!metadata.nominal_interval_ms.empty())
+        file << "# nominal_interval_ms="
+        << metadata.nominal_interval_ms << "\n";
+
+    // 音声周波数および振幅の補間方式
+    file << "# interpolation_audio_freq="
+        << metadata.interpolation_audio_freq << "\n";
+
+    file << "# interpolation_audio_amplitude="
+        << metadata.interpolation_audio_amplitude << "\n";
+
+    // 必須列を出力する。
+    // 時刻 [ms]、XYZ座標 [mm]
+    file << "time_ms,x_mm,y_mm,z_mm";
+
+    // 省略可能な列は、存在する場合だけ出力する。
+    // ジンバル角度 [rad]
+    if (columns.gimbal1_rad >= 0)
+        file << ",gimbal1_rad";
+
+    if (columns.gimbal2_rad >= 0)
+        file << ",gimbal2_rad";
+
+    if (columns.gimbal3_rad >= 0)
+        file << ",gimbal3_rad";
+
+    // ボタン状態（ビットマスク）
+    if (columns.buttons >= 0)
+        file << ",buttons";
+
+    // 音声周波数 [Hz]
+    if (columns.audio_freq_hz >= 0)
+        file << ",audio_freq_hz";
+
+    // 音声振幅（無次元、0.0～1.0）
+    if (columns.audio_amplitude >= 0)
+        file << ",audio_amplitude";
+
+    // ヘッダ行を終了する。
+    file << "\n";
+
+    // double型の値を再読み込み時に復元できるよう、
+    // 必要な有効桁数を指定する。
+    file << std::setprecision(
+        std::numeric_limits<double>::max_digits10);
+
+    // 全サンプルを1行ずつ出力する。
+    for (const MotionSample& sample : data)
+    {
+        // 必須項目：時刻 [ms]、XYZ座標 [mm]
+        file << sample.time_ms
+            << "," << sample.position[0]
+            << "," << sample.position[1]
+            << "," << sample.position[2];
+
+        // ジンバル角度 [rad]
+        if (columns.gimbal1_rad >= 0)
+            file << "," << sample.gimbalAngles[0];
+
+        if (columns.gimbal2_rad >= 0)
+            file << "," << sample.gimbalAngles[1];
+
+        if (columns.gimbal3_rad >= 0)
+            file << "," << sample.gimbalAngles[2];
+
+        // ボタン状態（ビットマスク）
+        if (columns.buttons >= 0)
+            file << "," << sample.buttons;
+
+        // 音声周波数 [Hz]
+        if (columns.audio_freq_hz >= 0)
+            file << "," << sample.audio_freq_hz;
+
+        // 音声振幅（無次元、0.0～1.0）
+        if (columns.audio_amplitude >= 0)
+            file << "," << sample.audio_amplitude;
+
+        // サンプル行を終了する。
+        file << "\n";
+    }
+
+    // ファイルへの書き込み結果を検査する。
+    if (!file)
+    {
+        fprintf(stderr,
+            "CSV write failed: %s\n",
+            filename);
+
+        return false;
+    }
+
+    // ファイルを閉じる。
+    // バッファに残っているデータも書き出される。
+    file.close();
+
+    // ファイルクローズ時のエラーを検査する。
+    if (file.fail())
+    {
+        fprintf(stderr,
+            "CSV close failed: %s\n",
+            filename);
+
+        return false;
+    }
+
+    // すべての書き込み処理が正常に完了した。
+    return true;
+}
+
+// 試験専用の一時ファイルを作成する。
+// 既存のCSVファイルを上書きしないために使用する。
+static bool createCSVTestFile(
+    char(&filename)[MAX_PATH])
+{
+    // Windowsの一時フォルダのパスを取得する。
+    char tempPath[MAX_PATH] = {};
+
+    const DWORD length =
+        GetTempPathA(MAX_PATH, tempPath);
+
+    if (length == 0 || length >= MAX_PATH)
+    {
+        fprintf(stderr,
+            "Cannot obtain temporary directory.\n");
+
+        return false;
+    }
+
+    // 重複しない名前の空ファイルを作成する。
+    if (GetTempFileNameA(
+        tempPath, "RnR", 0, filename) == 0)
+    {
+        fprintf(stderr,
+            "Cannot create temporary file.\n");
+
+        return false;
+    }
+
+    return true;
+}
+
+// 2つの運動サンプルの全項目が一致するか検査する。
+// CSV書き出し・再読み込みによる情報の欠落を検出する。
+static bool equalMotionSample(
+    const MotionSample& a,
+    const MotionSample& b)
+{
+    // 時刻（ms）
+    if (a.time_ms != b.time_ms)
+        return false;
+
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        // 位置（mm）
+        if (a.position[axis] != b.position[axis])
+            return false;
+
+        // ジンバル角（rad）
+        if (a.gimbalAngles[axis] != b.gimbalAngles[axis])
+            return false;
+    }
+
+    // ボタン状態
+    if (a.buttons != b.buttons)
+        return false;
+
+    // 音声周波数（Hz）
+    if (a.audio_freq_hz != b.audio_freq_hz)
+        return false;
+
+    // 音声振幅（0.0～1.0）
+    if (a.audio_amplitude != b.audio_amplitude)
+        return false;
+
+    return true;
+}
+
+// 2つの運動データについて、点数と全サンプルを比較する。
+// 不一致があれば、その位置を表示してfalseを返す。
+static bool equalMotionData(
+    const std::vector<MotionSample>& a,
+    const std::vector<MotionSample>& b)
+{
+    // サンプル数の一致を確認する。
+    if (a.size() != b.size())
+    {
+        fprintf(stderr,
+            "Sample count mismatch: %zu != %zu\n",
+            a.size(), b.size());
+
+        return false;
+    }
+
+    // 全サンプルを順番に比較する。
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (!equalMotionSample(a[i], b[i]))
+        {
+            fprintf(stderr,
+                "Motion data mismatch at sample %zu.\n",
+                i + 1);
+
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// 2つのCSVメタデータの全項目が一致するか検査する。
+static bool equalMotionCSVMetadata(
+    const MotionCSVMetadata& a,
+    const MotionCSVMetadata& b)
+{
+    return
+        a.format == b.format &&
+        a.version == b.version &&
+        a.title == b.title &&
+        a.device == b.device &&
+        a.source == b.source &&
+        a.created_at == b.created_at &&
+        a.nominal_interval_ms == b.nominal_interval_ms &&
+        a.interpolation_audio_freq ==
+        b.interpolation_audio_freq &&
+        a.interpolation_audio_amplitude ==
+        b.interpolation_audio_amplitude;
+}
+
+// 省略可能な列の有無が一致するか検査する。
+// 列番号や列の並び順は比較しない。
+static bool equalMotionCSVColumns(
+    const MotionCSVColumns& a,
+    const MotionCSVColumns& b)
+{
+    return
+        (a.gimbal1_rad >= 0) == (b.gimbal1_rad >= 0) &&
+        (a.gimbal2_rad >= 0) == (b.gimbal2_rad >= 0) &&
+        (a.gimbal3_rad >= 0) == (b.gimbal3_rad >= 0) &&
+        (a.buttons >= 0) == (b.buttons >= 0) &&
+        (a.audio_freq_hz >= 0) == (b.audio_freq_hz >= 0) &&
+        (a.audio_amplitude >= 0) == (b.audio_amplitude >= 0);
+}
+
+
+// Touchを使用せずにCSV書き出し処理を検証する。
+// 入力ファイルは指定する。
+// 出力ファイルは関数内部で自動生成する
+static bool testWriteMotionCSV(
+    const char* inputFilename)
+    try
+{
+    // 入力CSVを読み込み、形式を検査する。
+    if (!readMotionCSV(inputFilename))
+    {
+        fprintf(stderr,
+            "CSV write test: input error.\n");
+
+        return false;
+    }
+
+    // 再読み込みによってrawDataなどが更新されるため、
+// 比較用に書き出し前のデータを保存する。
+    const std::vector<MotionSample> originalData = rawData;
+    const MotionCSVMetadata originalMetadata = rawMetadata;
+    const MotionCSVColumns originalColumns = rawColumns;
+
+    // 試験専用の出力ファイルを確保する。
+    char outputFilename[MAX_PATH] = {};
+
+    if (!createCSVTestFile(outputFilename))
+    {
+        return false;
+    }
+
+    // 読み込んだ運動データをCSV形式で書き出す。
+    bool result = writeMotionCSV(
+        outputFilename,
+        rawData,
+        rawMetadata,
+        rawColumns);
+
+    // 書き出したCSVを再読み込みする。
+    if (result)
+    {
+        result = readMotionCSV(outputFilename);
+    }
+
+    // 運動データ全体を比較する。
+    if (result)
+    {
+        result = equalMotionData(
+            originalData, rawData);
+    }
+
+    // メタデータを比較する。
+    if (result)
+    {
+        result = equalMotionCSVMetadata(
+            originalMetadata, rawMetadata);
+
+        if (!result)
+        {
+            fprintf(stderr,
+                "CSV metadata mismatch.\n");
+        }
+    }
+
+    // 省略可能な列の有無を比較する。
+    if (result)
+    {
+        result = equalMotionCSVColumns(
+            originalColumns, rawColumns);
+
+        if (!result)
+        {
+            fprintf(stderr,
+                "CSV columns mismatch.\n");
+        }
+    }
+
+    // 書き出し結果を表示する。
+    fprintf(stderr, "Result: %s\n",
+        result ? "PASS" : "FAIL");
+
+    if (result)
+    {
+        fprintf(stderr, "Output file: %s\n",
+            outputFilename);
+
+        fprintf(stderr, "Samples: %zu\n",
+            rawData.size());
+    }
+
+    // 試験成功時は一時ファイルを削除する。
+    // 詳細表示モードでは内容確認のために残す。
+    if (result && !VerboseMode)
+    {
+        if (!DeleteFileA(outputFilename))
+        {
+            fprintf(stderr,
+                "Cannot delete temporary file: %s\n",
+                outputFilename);
+        }
+    }
+
+    return result;
+}
+catch (const std::bad_alloc&)
+{
+    // メモリ確保に失敗した場合は試験を中止する。
+    fprintf(stderr,
+        "Memory allocation failed. CSV write test cancelled.\n");
+
+    return false;
+}
+
+
 
 void writeResampledReplayData() {
     int t;
@@ -2300,6 +2783,9 @@ int main(int argc, char* argv[])
     // Touchを使用しないリサンプリング検証モード。
     bool testResample = false;
 
+    // Touchを使用しないCSV書き出し試験モード。
+    bool testWriteCSV = false;
+
 for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
         replayFilename = argv[++i];
@@ -2325,6 +2811,11 @@ for (int i = 1; i < argc; ++i) {
     else if (strcmp(argv[i], "--test-resample") == 0)
     {
         testResample = true;
+    }
+
+    else if (strcmp(argv[i], "--test-write-csv") == 0)
+    {
+        testWriteCSV = true;
     }
 
 }
@@ -2362,6 +2853,16 @@ if (testResample)
     return testResampleCSV(filename) ? 0 : 1;
 }
 
+// Touchを初期化せずにCSV書き出しを検証する。
+if (testWriteCSV)
+{
+    const char* filename =
+        replayFilename != NULL
+        ? replayFilename
+        : FNAME_REC;
+
+    return testWriteMotionCSV(filename) ? 0 : 1;
+}
 
 HDErrorInfo error;
 
