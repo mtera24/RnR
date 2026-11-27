@@ -2309,32 +2309,81 @@ static bool testResampleCSV(const char* filename)
     return result;
 }
 
-// RnR CSV Version 1.0形式で運動データを書き出す。
+// 出力先と同じディレクトリに一時ファイルを生成する。
+// 成功時はtrue、失敗時はfalseを返す。
+static bool createCSVOutputTempFile(
+    const char* filename,
+    char(&tempFilename)[MAX_PATH])
+{
+    // 出力先の絶対パスを取得する。
+    char fullPath[MAX_PATH] = {};
+    char* filePart = nullptr;
+
+    const DWORD length = GetFullPathNameA(
+        filename,
+        MAX_PATH,
+        fullPath,
+        &filePart);
+
+    // パスの取得結果を検査する。
+    if (length == 0 ||
+        length >= MAX_PATH ||
+        filePart == nullptr)
+    {
+        fprintf(stderr,
+            "Cannot resolve output path: %s\n",
+            filename);
+
+        return false;
+    }
+
+    // ファイル名部分を切り離し、
+    // ディレクトリ部分だけを残す。
+    *filePart = '\0';
+
+    // 同じディレクトリに一時ファイルを生成する。
+    if (GetTempFileNameA(
+        fullPath,
+        "RnR",
+        0,
+        tempFilename) == 0)
+    {
+        fprintf(stderr,
+            "Cannot create temporary file: %s\n",
+            fullPath);
+
+        return false;
+    }
+
+    return true;
+}
+
+// CSV出力用の一時ファイルを削除する。
+// 削除に失敗した場合は警告を表示する。
+static void removeCSVOutputTempFile(
+    const char* tempFilename)
+{
+    if (!DeleteFileA(tempFilename))
+    {
+        const DWORD errorCode = GetLastError();
+
+        fprintf(stderr,
+            "Cannot remove temporary file: %s (error=%lu)\n",
+            tempFilename,
+            static_cast<unsigned long>(errorCode));
+    }
+}
+
+
+// 検査済みの運動データをRnR CSV Version 1.0形式で出力する。
 // 正常終了時はtrue、失敗時はfalseを返す。
-// 実機再生の許可状態は変更しない。
-static bool writeMotionCSV(
+// 入力データの検査とファイル保護は呼び出し元が担当する。
+static bool writeMotionCSVContent(
     const char* filename,
     const std::vector<MotionSample>& data,
     const MotionCSVMetadata& metadata,
     const MotionCSVColumns& columns)
 {
-
-
-    // メタデータがCSV Version 1.0の仕様に
-    // 適合しているか検査する。
-    if (!validateCSVMetadata(metadata))
-    {
-        fprintf(stderr,
-            "Invalid CSV metadata.\n");
-
-        return false;
-    }
-
-    // 運動データ全体がCSV仕様に適合するか検査する。
-    if (!validateMotionData(data))
-    {
-        return false;
-    }
 
     // CSV出力先ファイルを開く。
     std::ofstream file(filename);
@@ -2481,6 +2530,91 @@ static bool writeMotionCSV(
     // すべての書き込み処理が正常に完了した。
     return true;
 }
+
+// CSV保存処理全体を管理する。
+// overwrite：既存ファイルへの上書き許可。
+static bool writeMotionCSV(
+    const char* filename,
+    const std::vector<MotionSample>& data,
+    const MotionCSVMetadata& metadata,
+    const MotionCSVColumns& columns,
+    bool overwrite = false)
+{
+    // メタデータがCSV Version 1.0の仕様に
+    // 適合しているか検査する。
+    if (!validateCSVMetadata(metadata))
+    {
+        fprintf(stderr,
+            "Invalid CSV metadata.\n");
+
+        return false;
+    }
+
+    // 運動データ全体がCSV仕様に適合するか検査する。
+    if (!validateMotionData(data))
+    {
+        return false;
+    }
+
+    // 出力先と同じディレクトリに
+    // 一時ファイルを生成する。
+    char tempFilename[MAX_PATH] = {};
+
+    if (!createCSVOutputTempFile(
+        filename, tempFilename))
+    {
+        return false;
+    }
+
+    // 検査済みのデータを一時ファイルに書き出す。
+    try
+    {
+        if (!writeMotionCSVContent(
+            tempFilename, data, metadata, columns))
+        {
+            removeCSVOutputTempFile(tempFilename);
+
+            return false;
+        }
+    }
+    catch (...)
+    {
+        // 例外発生時にも一時ファイルを削除する。
+        removeCSVOutputTempFile(tempFilename);
+
+        // 例外を呼び出し元へ伝える。
+        throw;
+    }
+
+    // 上書き許可に応じてファイル移動の条件を設定する。
+    DWORD moveFlags = 0;
+
+    if (overwrite)
+    {
+        moveFlags |= MOVEFILE_REPLACE_EXISTING;
+    }
+
+    // 一時ファイルを正式ファイルに反映する。
+    if (!MoveFileExA(
+        tempFilename, filename, moveFlags))
+    {
+        // エラー番号を取得する。
+        const DWORD errorCode = GetLastError();
+
+        fprintf(stderr,
+            "Cannot finalize CSV file: %s (error=%lu)\n",
+            filename,
+            static_cast<unsigned long>(errorCode));
+
+        // 反映に失敗した一時ファイルを削除する。
+        removeCSVOutputTempFile(tempFilename);
+
+        return false;
+    }
+
+    return true;
+}
+
 
 // 試験専用の一時ファイルを作成する。
 // 既存のCSVファイルを上書きしないために使用する。
@@ -2659,7 +2793,7 @@ static bool testRejectedWrite(
 
     // 異常データの書き出しを試みる。
     const bool rejected = !writeMotionCSV(
-        filename, data, metadata, columns);
+        filename, data, metadata, columns, true);
 
     // 書き出し後のファイル内容
     std::string after;
@@ -2716,7 +2850,8 @@ static bool testWriteMotionCSV(
         outputFilename,
         rawData,
         rawMetadata,
-        rawColumns);
+        rawColumns,
+        true);
 
     // 書き出したCSVを再読み込みする。
     if (result)
@@ -2834,7 +2969,7 @@ static bool testWriteMotionCSVUnit()
 
     // W01：正常データの書き出し
     bool result = writeMotionCSV(
-        filename, data, metadata, columns);
+        filename, data, metadata, columns, true);
 
     fprintf(stderr, "W01: %s\n",
         result ? "PASS" : "FAIL");
@@ -3027,13 +3162,114 @@ static bool testWriteMotionCSVUnit()
 
     result = result && passed;
 
-    // W17：出力ファイルを開けない場合
-// Windowsのファイル名に使用できない文字を指定する。
+    // W17：正式ファイルへの反映に失敗する場合
+    // Windowsのファイル名に使用できない文字を指定する。
     passed = !writeMotionCSV(
         "invalid<filename>.csv",
         data, metadata, columns);
 
     fprintf(stderr, "W17: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W18：存在しないファイルへの新規保存
+
+    // 既存の試験用ファイルを削除する。
+    passed = DeleteFileA(filename) != 0;
+
+    if (passed)
+    {
+        // 上書き許可を指定せずに保存する。
+        passed = writeMotionCSV(
+            filename, data, metadata, columns);
+    }
+
+    fprintf(stderr, "W18: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+ // W19：デフォルトでの上書き拒否
+// W18で生成したファイルへの再保存を試みる。
+    passed = !writeMotionCSV(
+        filename, data, metadata, columns);
+
+    fprintf(stderr, "W19: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W20：上書き拒否時の既存ファイルの保全
+    std::string beforeBytes;
+    std::string afterBytes;
+
+    // 上書き試行前のファイル内容を取得する。
+    passed = readFileBytes(filename, beforeBytes);
+
+    if (passed)
+    {
+        // 元のデータとは異なる運動データを用意する。
+        std::vector<MotionSample> modifiedData = data;
+        modifiedData[0].position[0] += 1.0;
+
+        // 上書き許可を指定せずに保存を試みる。
+        passed = !writeMotionCSV(
+            filename, modifiedData, metadata, columns);
+    }
+
+    if (passed)
+    {
+        // 上書き試行後のファイル内容を取得する。
+        passed = readFileBytes(filename, afterBytes);
+    }
+
+    if (passed)
+    {
+        // ファイル内容が完全に一致することを確認する。
+        passed = (beforeBytes == afterBytes);
+    }
+
+    fprintf(stderr, "W20: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W21：明示的な上書き許可
+
+    // 元のデータとは異なる運動データを用意する。
+    std::vector<MotionSample> overwriteData = data;
+    overwriteData[0].position[0] += 2.0;
+
+    // 明示的に上書きを許可して保存する。
+    passed = writeMotionCSV(
+        filename, overwriteData, metadata, columns, true);
+
+    fprintf(stderr, "W21: %s\n",
+        passed ? "PASS" : "FAIL");
+
+    result = result && passed;
+
+    // W22：上書き後のCSV内容の検証
+
+    // 上書き後のCSVを読み込む。
+    passed = readMotionCSV(filename);
+
+    if (passed)
+    {
+        // サンプル数が一致することを確認する。
+        passed = (rawData.size() == overwriteData.size());
+    }
+
+    if (passed)
+    {
+        // 変更したX座標が反映されていることを確認する。
+        passed = (
+            rawData[0].position[0] ==
+            overwriteData[0].position[0]);
+    }
+
+    fprintf(stderr, "W22: %s\n",
         passed ? "PASS" : "FAIL");
 
     result = result && passed;
